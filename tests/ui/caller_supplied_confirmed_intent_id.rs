@@ -1,7 +1,8 @@
-use chatty_factory_rebuild::{confirm_intent, external_operator_assertion};
+use chatty_factory_rebuild::{external_operator_assertion, RuntimeJournal};
 
 fn main() {
-    let _ = confirm_intent(
+    let journal = RuntimeJournal::new(".", "trace", "request");
+    let _ = journal.confirm_intent(
         "caller-picked-intent",
         todo!(),
         external_operator_assertion("assertion", "operator-confirmation"),

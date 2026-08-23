@@ -274,7 +274,7 @@ impl ConfirmedIntentCapability {
     }
 }
 
-pub fn confirm_intent(
+fn confirm_intent(
     draft: IntentDraft,
     confirmation_assertion: ExternalOperatorAssertionReceipt,
 ) -> Result<ConfirmedIntentCapability, String> {
@@ -305,6 +305,21 @@ fn confirmed_intent_receipt_id(
         confirmation_assertion,
     ))?;
     Ok(format!("confirmed-intent-{}", &hash[..16]))
+}
+
+fn validate_confirmed_intent_receipt(receipt: &ConfirmedIntentReceipt) -> Result<(), String> {
+    let draft = IntentDraft {
+        draft_id: format!("validated-{}", receipt.receipt_id),
+        exact_request: receipt.exact_request.clone(),
+        derived_claims: receipt.derived_claims.clone(),
+    };
+    validate_intent_draft(&draft)?;
+    validate_external_operator_assertion(&receipt.confirmation_assertion)?;
+    let expected_id = confirmed_intent_receipt_id(&draft, &receipt.confirmation_assertion)?;
+    if receipt.receipt_id != expected_id {
+        return Err("confirmed intent receipt id mismatch".to_string());
+    }
+    Ok(())
 }
 
 pub fn validate_intent_draft(draft: &IntentDraft) -> Result<(), String> {
@@ -1146,7 +1161,7 @@ pub enum FactoryOutput {
     },
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum EfRescueAttemptOutcome {
     #[non_exhaustive]
@@ -1308,6 +1323,28 @@ impl RuntimeJournal {
         }
     }
 
+    pub fn confirm_intent(
+        &self,
+        draft: IntentDraft,
+        confirmation_assertion: ExternalOperatorAssertionReceipt,
+    ) -> Result<ConfirmedIntentCapability, String> {
+        let intent = confirm_intent(draft, confirmation_assertion)?;
+        let existing = self.verify()?;
+        if existing.iter().any(|record| {
+            record.record_kind == RuntimeRecordKind::ConfirmedIntentReceipt
+                && record
+                    .payload
+                    .get("receipt_id")
+                    .and_then(|value| value.as_str())
+                    == Some(intent.receipt.receipt_id.as_str())
+        }) {
+            return Err("confirmed intent receipt already exists in journal".to_string());
+        }
+        let request_record = self.append_request(&intent.receipt.exact_request)?;
+        self.append_confirmed_intent_receipt(request_record.record_id, &intent)?;
+        Ok(intent)
+    }
+
     fn append_request(&self, request: &ExactRequest) -> Result<RuntimeRecordEnvelope, String> {
         if request.request_id != self.request_id {
             return Err("request id does not match journal".to_string());
@@ -1326,6 +1363,31 @@ impl RuntimeJournal {
             vec![parent_request_record_id],
             intent.receipt(),
         )
+    }
+
+    fn ensure_confirmed_intent_record(
+        &self,
+        intent: &ConfirmedIntentCapability,
+    ) -> Result<RuntimeRecordEnvelope, String> {
+        for record in self.verify()? {
+            if record.record_kind != RuntimeRecordKind::ConfirmedIntentReceipt {
+                continue;
+            }
+            let receipt_id = record
+                .payload
+                .get("receipt_id")
+                .and_then(|value| value.as_str());
+            if receipt_id != Some(intent.receipt.receipt_id.as_str()) {
+                continue;
+            }
+            if record.payload_hash != intent.receipt_hash {
+                return Err("confirmed intent receipt hash mismatch".to_string());
+            }
+            return Ok(record);
+        }
+
+        let request_record = self.append_request(&intent.receipt().exact_request)?;
+        self.append_confirmed_intent_receipt(request_record.record_id, intent)
     }
 
     fn append_proposal(
@@ -1516,11 +1578,8 @@ impl RuntimeJournal {
         )?;
         self.ensure_attempt_id_unused(&allowed.gate_receipt.attempt_id)
             .map_err(|err| blocked_gate_from_allowed(&allowed, err))?;
-        let request_record = self
-            .append_request(&intent.receipt().exact_request)
-            .map_err(|err| blocked_gate_from_allowed(&allowed, err))?;
         let intent_record = self
-            .append_confirmed_intent_receipt(request_record.record_id, intent)
+            .ensure_confirmed_intent_record(intent)
             .map_err(|err| blocked_gate_from_allowed(&allowed, err))?;
         let proposal_record = self
             .append_proposal(
@@ -1806,6 +1865,28 @@ impl RuntimeJournal {
         Ok(records)
     }
 
+    pub fn reissue_confirmed_intent(
+        &self,
+        confirmed_intent_record_id: &str,
+    ) -> Result<ConfirmedIntentCapability, String> {
+        let records = self.verify()?;
+        let record = find_record(&records, confirmed_intent_record_id)?;
+        if record.record_kind != RuntimeRecordKind::ConfirmedIntentReceipt {
+            return Err("record is not a confirmed intent receipt".to_string());
+        }
+        let receipt: ConfirmedIntentReceipt = serde_json::from_value(record.payload.clone())
+            .map_err(|err| format!("could not decode confirmed intent receipt: {err}"))?;
+        validate_confirmed_intent_receipt(&receipt)?;
+        if record.payload_hash != hash_serializable(&receipt)? {
+            return Err("confirmed intent receipt hash mismatch".to_string());
+        }
+        Ok(ConfirmedIntentCapability {
+            capability_id: format!("cap-confirmed-intent-{}", receipt.receipt_id),
+            receipt,
+            receipt_hash: record.payload_hash.clone(),
+        })
+    }
+
     pub fn reissue_allowed_attempt(
         &self,
         gate_record_id: &str,
@@ -1875,9 +1956,7 @@ impl RuntimeJournal {
             bounds,
             promoted_constraints,
         );
-        let request_record = self.append_request(&intent.receipt().exact_request)?;
-        let intent_record =
-            self.append_confirmed_intent_receipt(request_record.record_id, intent)?;
+        let intent_record = self.ensure_confirmed_intent_record(intent)?;
         let proposal_record =
             self.append_proposal(&gate.attempt_id, intent_record.record_id, proposal)?;
         let gate_record = self.append_gate_receipt(proposal_record.record_id, &gate)?;
@@ -2263,7 +2342,7 @@ fn verify_semantic_record_bindings(
             let receipt: ConfirmedIntentReceipt = decode_payload(record)?;
             let parent = only_parent(record, by_id)?;
             let request: ExactRequest = decode_payload(parent)?;
-            validate_external_operator_assertion(&receipt.confirmation_assertion)?;
+            validate_confirmed_intent_receipt(&receipt)?;
             if receipt.exact_request != request {
                 return Err("confirmed intent is not bound to parent request".to_string());
             }
@@ -4290,6 +4369,119 @@ mod tests {
     }
 
     #[test]
+    fn journal_confirm_intent_replay_fails_after_reload() {
+        let runtime = tempfile::tempdir().unwrap();
+        let journal = RuntimeJournal::new(runtime.path(), "trace-1", "request-1");
+        let request_draft = draft("Create README with hello", "file_contains:README.md::hello");
+        let assertion = external_operator_assertion("operator-confirmation");
+        journal
+            .confirm_intent(request_draft.clone(), assertion.clone())
+            .unwrap();
+
+        let reloaded = RuntimeJournal::new(runtime.path(), "trace-1", "request-1");
+        assert!(reloaded.confirm_intent(request_draft, assertion).is_err());
+    }
+
+    #[test]
+    fn verified_journal_reissues_confirmed_intent_after_reload() {
+        let runtime = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let journal = RuntimeJournal::new(runtime.path(), "trace-1", "request-1");
+        journal
+            .confirm_intent(
+                draft("Create README with hello", "file_contains:README.md::hello"),
+                external_operator_assertion("operator-confirmation"),
+            )
+            .unwrap();
+        let confirmed_record_id = journal
+            .verify()
+            .unwrap()
+            .into_iter()
+            .find(|record| record.record_kind == RuntimeRecordKind::ConfirmedIntentReceipt)
+            .unwrap()
+            .record_id;
+
+        let reloaded = RuntimeJournal::new(runtime.path(), "trace-1", "request-1");
+        let reissued = reloaded
+            .reissue_confirmed_intent(&confirmed_record_id)
+            .unwrap();
+        let method = proposal("proposal-a", "README.md", "hello");
+        reloaded
+            .issue_allowed_attempt(&reissued, &method, &bounds(workspace.path()), &[])
+            .unwrap();
+    }
+
+    #[test]
+    fn confirmed_intent_reissue_requires_confirmed_intent_record() {
+        let runtime = tempfile::tempdir().unwrap();
+        let journal = RuntimeJournal::new(runtime.path(), "trace-1", "request-1");
+        journal
+            .confirm_intent(
+                draft("Create README with hello", "file_contains:README.md::hello"),
+                external_operator_assertion("operator-confirmation"),
+            )
+            .unwrap();
+        let request_record_id = journal
+            .verify()
+            .unwrap()
+            .into_iter()
+            .find(|record| record.record_kind == RuntimeRecordKind::Request)
+            .unwrap()
+            .record_id;
+
+        assert!(journal
+            .reissue_confirmed_intent(&request_record_id)
+            .unwrap_err()
+            .contains("record is not a confirmed intent receipt"));
+    }
+
+    #[test]
+    fn attempts_reuse_journal_backed_confirmed_intent_record() {
+        let runtime = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let journal = RuntimeJournal::new(runtime.path(), "trace-1", "request-1");
+        let intent = journal
+            .confirm_intent(
+                draft("Create README with hello", "file_contains:README.md::hello"),
+                external_operator_assertion("operator-confirmation"),
+            )
+            .unwrap();
+
+        journal
+            .issue_allowed_attempt(
+                &intent,
+                &proposal("proposal-a", "README.md", "hello"),
+                &bounds(workspace.path()),
+                &[],
+            )
+            .unwrap();
+        journal
+            .issue_allowed_attempt(
+                &intent,
+                &proposal("proposal-b", "README.md", "hello again"),
+                &bounds(workspace.path()),
+                &[],
+            )
+            .unwrap();
+
+        let records = journal.verify().unwrap();
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| record.record_kind == RuntimeRecordKind::ConfirmedIntentReceipt)
+                .count(),
+            1
+        );
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| record.record_kind == RuntimeRecordKind::GateReceipt)
+                .count(),
+            2
+        );
+    }
+
+    #[test]
     fn persisted_forged_external_operator_assertion_fails_journal_verification() {
         let runtime = tempfile::tempdir().unwrap();
         let intent = intent();
@@ -4400,6 +4592,52 @@ mod tests {
             .verify()
             .unwrap_err()
             .contains("external operator assertion statement mismatch"));
+    }
+
+    #[test]
+    fn persisted_forged_confirmed_intent_receipt_id_fails_journal_verification() {
+        let runtime = tempfile::tempdir().unwrap();
+        let intent = intent();
+        let journal = RuntimeJournal::new(runtime.path(), "trace-1", "request-1");
+        let request = journal
+            .append_request(&intent.receipt().exact_request)
+            .unwrap();
+        journal
+            .append_confirmed_intent_receipt(request.record_id, &intent)
+            .unwrap();
+
+        let journal_path = runtime.path().join("runtime_records.jsonl");
+        let mut records = read_records(&journal_path);
+        let confirmed = records
+            .iter_mut()
+            .find(|record| record.record_kind == RuntimeRecordKind::ConfirmedIntentReceipt)
+            .unwrap();
+        confirmed.payload["receipt_id"] = serde_json::json!("confirmed-intent-forged");
+        confirmed.payload_hash = hash_json_value(&confirmed.payload).unwrap();
+        confirmed.record_hash = compute_record_hash(RecordHashInput {
+            record_id: &confirmed.record_id,
+            sequence_number: confirmed.sequence_number,
+            record_kind: confirmed.record_kind,
+            trace_id: &confirmed.trace_id,
+            request_id: &confirmed.request_id,
+            attempt_id: &confirmed.attempt_id,
+            parent_record_ids: &confirmed.parent_record_ids,
+            previous_record_hash: &confirmed.previous_record_hash,
+            payload_hash: &confirmed.payload_hash,
+            payload: &confirmed.payload,
+        })
+        .unwrap();
+        write_records(&journal_path, &records);
+        fs::write(
+            runtime.path().join("journal_head.json"),
+            serde_json::to_string(&head_anchor_for(&records)).unwrap(),
+        )
+        .unwrap();
+
+        assert!(journal
+            .verify()
+            .unwrap_err()
+            .contains("confirmed intent receipt id mismatch"));
     }
 
     #[test]
@@ -4970,6 +5208,7 @@ mod tests {
         tests.compile_fail("tests/ui/forge_host_bounds_literal.rs");
         tests.compile_fail("tests/ui/headless_factory_output_unavailable.rs");
         tests.compile_fail("tests/ui/deserialize_ef_rescue_attempt_outcome.rs");
+        tests.compile_fail("tests/ui/serialize_ef_rescue_attempt_outcome.rs");
         tests.compile_fail("tests/ui/forge_ef_rescue_attempt_outcome.rs");
         tests.compile_fail("tests/ui/forge_promoted_constraint.rs");
         tests.compile_fail("tests/ui/promotion_receipt_constructors_unavailable.rs");
@@ -4979,6 +5218,7 @@ mod tests {
         tests.compile_fail("tests/ui/live_authority_serialize.rs");
         tests.compile_fail("tests/ui/caller_supplied_work_order_id.rs");
         tests.compile_fail("tests/ui/caller_supplied_confirmed_intent_id.rs");
+        tests.compile_fail("tests/ui/standalone_confirm_intent_unavailable.rs");
         tests.compile_fail("tests/ui/caller_supplied_operator_assertion_id.rs");
         tests.compile_fail("tests/ui/caller_supplied_triangulation_ids.rs");
         tests.compile_fail("tests/ui/direct_isolated_triangulation_unavailable.rs");

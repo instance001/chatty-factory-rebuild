@@ -1,5 +1,5 @@
 error[E0616]: field `steps` of struct `chatty_factory_rebuild::WorkOrderReceipt` is private
-  --> tests/ui/forge_work_order_receipt.rs:38:13
+  --> tests/ui/forge_work_order_receipt.rs:39:13
    |
-38 |     receipt.steps = vec![];
+39 |     receipt.steps = vec![];
    |             ^^^^^ private field

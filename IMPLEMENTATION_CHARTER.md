@@ -8,6 +8,10 @@ reviewed constraint promotion; it is not hidden model self-learning, model
 memory, or unreviewed doctrine. `Authority` is external operator confirmation
 and capability control, not cryptographic identity proof.
 
+ChattyFactory is a local agentic build system. Its trust boundary assumes a
+legitimate local operator/host and focuses on preventing model-side authority
+fabrication, escalation, replay, or bypass.
+
 The architecture split is:
 
 - User = intent and authority

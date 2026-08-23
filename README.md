@@ -17,6 +17,10 @@ unreviewed doctrine.
 capability spend. The crate records an external operator assertion but does not
 provide cryptographic human identity proof.
 
+ChattyFactory is a local agentic build system. Its trust boundary assumes a
+legitimate local operator/host and focuses on preventing model-side authority
+fabrication, escalation, replay, or bypass.
+
 ## Storage and Portability
 
 This crate does not choose a machine-specific data directory. Callers provide

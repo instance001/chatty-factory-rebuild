@@ -1,0 +1,25 @@
+error[E0603]: function `confirm_intent` is private
+ --> tests/ui/standalone_confirm_intent_unavailable.rs:1:29
+  |
+1 | use chatty_factory_rebuild::confirm_intent;
+  |                             ^^^^^^^^^^^^^^ private function
+  |
+note: the function `confirm_intent` is defined here
+ --> src/lib.rs
+  |
+  | / fn confirm_intent(
+  | |     draft: IntentDraft,
+  | |     confirmation_assertion: ExternalOperatorAssertionReceipt,
+  | | ) -> Result<ConfirmedIntentCapability, String> {
+  | |______________________________________________^
+
+warning: unreachable expression
+ --> tests/ui/standalone_confirm_intent_unavailable.rs:4:37
+  |
+4 |     let _ = confirm_intent(todo!(), todo!());
+  |                            -------  ^^^^^^^ unreachable expression
+  |                            |
+  |                            any code following this expression is unreachable
+  |
+  = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
+  = note: this warning originates in the macro `todo` (in Nightly builds, run with -Z macro-backtrace for more info)

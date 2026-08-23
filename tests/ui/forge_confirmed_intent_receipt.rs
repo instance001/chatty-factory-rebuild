@@ -1,6 +1,6 @@
 use chatty_factory_rebuild::{
-    confirm_intent, external_operator_assertion, ExactRequest, IntentClaim, IntentClaimKind,
-    IntentDraft, SourceSpan,
+    external_operator_assertion, ExactRequest, IntentClaim, IntentClaimKind, IntentDraft,
+    RuntimeJournal, SourceSpan,
 };
 
 fn main() {
@@ -12,7 +12,10 @@ fn main() {
         vec![SourceSpan::new(0, 5, "hello")],
     );
     let draft = IntentDraft::new("draft", request, vec![claim]);
-    let confirmed = confirm_intent(draft, external_operator_assertion("operator")).unwrap();
+    let journal = RuntimeJournal::new(".", "trace", "request");
+    let confirmed = journal
+        .confirm_intent(draft, external_operator_assertion("operator"))
+        .unwrap();
     let mut receipt = confirmed.receipt().clone();
     receipt.receipt_id = "caller-picked".to_string();
 }
