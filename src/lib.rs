@@ -2047,7 +2047,7 @@ impl RuntimeJournal {
 
         let sequence_number = existing.len() as u64;
         let previous_record_hash = existing.last().map(|record| record.record_hash.clone());
-        let record_id = format!("{}-{sequence_number}", kind_slug(record_kind));
+        let record_id = expected_record_id(record_kind, sequence_number);
         let payload = serde_json::to_value(payload)
             .map_err(|err| format!("could not serialize runtime payload: {err}"))?;
         let payload_hash = hash_json_value(&payload)?;
@@ -2236,6 +2236,13 @@ fn verify_records(
             return Err(format!(
                 "record '{}' has reordered sequence",
                 record.record_id
+            ));
+        }
+        let expected_record_id = expected_record_id(record.record_kind, record.sequence_number);
+        if record.record_id != expected_record_id {
+            return Err(format!(
+                "record '{}' has invalid deterministic record id; expected '{}'",
+                record.record_id, expected_record_id
             ));
         }
         if !sequences.insert(record.sequence_number) {
@@ -3557,6 +3564,10 @@ fn kind_slug(kind: RuntimeRecordKind) -> &'static str {
     }
 }
 
+fn expected_record_id(kind: RuntimeRecordKind, sequence_number: u64) -> String {
+    format!("{}-{sequence_number}", kind_slug(kind))
+}
+
 fn hash_serializable<T: Serialize>(value: &T) -> Result<String, String> {
     serde_json::to_value(value)
         .map_err(|err| format!("could not serialize hash value: {err}"))
@@ -4638,6 +4649,50 @@ mod tests {
             .verify()
             .unwrap_err()
             .contains("confirmed intent receipt id mismatch"));
+    }
+
+    #[test]
+    fn altered_envelope_record_id_fails_deterministic_id_verification() {
+        let runtime = tempfile::tempdir().unwrap();
+        let journal = RuntimeJournal::new(runtime.path(), "trace-1", "request-1");
+        journal
+            .confirm_intent(
+                draft("Create README with hello", "file_contains:README.md::hello"),
+                external_operator_assertion("operator-confirmation"),
+            )
+            .unwrap();
+
+        let journal_path = runtime.path().join("runtime_records.jsonl");
+        let mut records = read_records(&journal_path);
+        let confirmed = records
+            .iter_mut()
+            .find(|record| record.record_kind == RuntimeRecordKind::ConfirmedIntentReceipt)
+            .unwrap();
+        confirmed.record_id = "confirmed-intent-forged-1".to_string();
+        confirmed.record_hash = compute_record_hash(RecordHashInput {
+            record_id: &confirmed.record_id,
+            sequence_number: confirmed.sequence_number,
+            record_kind: confirmed.record_kind,
+            trace_id: &confirmed.trace_id,
+            request_id: &confirmed.request_id,
+            attempt_id: &confirmed.attempt_id,
+            parent_record_ids: &confirmed.parent_record_ids,
+            previous_record_hash: &confirmed.previous_record_hash,
+            payload_hash: &confirmed.payload_hash,
+            payload: &confirmed.payload,
+        })
+        .unwrap();
+        write_records(&journal_path, &records);
+        fs::write(
+            runtime.path().join("journal_head.json"),
+            serde_json::to_string(&head_anchor_for(&records)).unwrap(),
+        )
+        .unwrap();
+
+        assert!(journal
+            .verify()
+            .unwrap_err()
+            .contains("invalid deterministic record id"));
     }
 
     #[test]
