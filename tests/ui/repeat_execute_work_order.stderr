@@ -1,0 +1,10 @@
+error[E0382]: use of moved value: `work_order`
+ --> tests/ui/repeat_execute_work_order.rs:9:40
+  |
+5 |     work_order: AuthorizedWorkOrderCapability,
+  |     ---------- move occurs because `work_order` has type `AuthorizedWorkOrderCapability`, which does not implement the `Copy` trait
+...
+8 |     let _ = journal.execute_work_order(work_order, bounds);
+  |                                        ---------- value moved here
+9 |     let _ = journal.execute_work_order(work_order, bounds);
+  |                                        ^^^^^^^^^^ value used here after move

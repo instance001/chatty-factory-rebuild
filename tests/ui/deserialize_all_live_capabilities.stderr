@@ -1,0 +1,161 @@
+error[E0277]: the trait bound `ConfirmedIntentCapability: serde::Deserialize<'de>` is not satisfied
+ --> tests/ui/deserialize_all_live_capabilities.rs:7:49
+  |
+7 |     let _confirmed: ConfirmedIntentCapability = serde_json::from_str("{}").unwrap();
+  |                                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `serde_core::de::Deserialize<'_>` is not implemented for `ConfirmedIntentCapability`
+  |
+  = note: for local types consider adding `#[derive(serde::Deserialize)]` to your `ConfirmedIntentCapability` type
+  = note: for types from other crates check whether the crate offers a `serde` feature flag
+  = help: the following other types implement trait `serde_core::de::Deserialize<'de>`:
+            &'a Path
+            &'a [u8]
+            &'a str
+            ()
+            (T,)
+            (T0, T1)
+            (T0, T1, T2)
+            (T0, T1, T2, T3)
+          and $N others
+note: required by a bound in `serde_json::from_str`
+ --> $CARGO/serde_json-$VERSION/src/de.rs
+  |
+  | pub fn from_str<'a, T>(s: &'a str) -> Result<T>
+  |        -------- required by a bound in this function
+  | where
+  |     T: de::Deserialize<'a>,
+  |        ^^^^^^^^^^^^^^^^^^^ required by this bound in `from_str`
+
+error[E0277]: the trait bound `AllowedAttemptCapability: serde::Deserialize<'de>` is not satisfied
+ --> tests/ui/deserialize_all_live_capabilities.rs:8:46
+  |
+8 |     let _allowed: AllowedAttemptCapability = serde_json::from_str("{}").unwrap();
+  |                                              ^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `serde_core::de::Deserialize<'_>` is not implemented for `AllowedAttemptCapability`
+  |
+  = note: for local types consider adding `#[derive(serde::Deserialize)]` to your `AllowedAttemptCapability` type
+  = note: for types from other crates check whether the crate offers a `serde` feature flag
+  = help: the following other types implement trait `serde_core::de::Deserialize<'de>`:
+            &'a Path
+            &'a [u8]
+            &'a str
+            ()
+            (T,)
+            (T0, T1)
+            (T0, T1, T2)
+            (T0, T1, T2, T3)
+          and $N others
+note: required by a bound in `serde_json::from_str`
+ --> $CARGO/serde_json-$VERSION/src/de.rs
+  |
+  | pub fn from_str<'a, T>(s: &'a str) -> Result<T>
+  |        -------- required by a bound in this function
+  | where
+  |     T: de::Deserialize<'a>,
+  |        ^^^^^^^^^^^^^^^^^^^ required by this bound in `from_str`
+
+error[E0277]: the trait bound `AuthorizedWorkOrderCapability: serde::Deserialize<'de>` is not satisfied
+ --> tests/ui/deserialize_all_live_capabilities.rs:9:54
+  |
+9 |     let _work_order: AuthorizedWorkOrderCapability = serde_json::from_str("{}").unwrap();
+  |                                                      ^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `serde_core::de::Deserialize<'_>` is not implemented for `AuthorizedWorkOrderCapability`
+  |
+  = note: for local types consider adding `#[derive(serde::Deserialize)]` to your `AuthorizedWorkOrderCapability` type
+  = note: for types from other crates check whether the crate offers a `serde` feature flag
+  = help: the following other types implement trait `serde_core::de::Deserialize<'de>`:
+            &'a Path
+            &'a [u8]
+            &'a str
+            ()
+            (T,)
+            (T0, T1)
+            (T0, T1, T2)
+            (T0, T1, T2, T3)
+          and $N others
+note: required by a bound in `serde_json::from_str`
+ --> $CARGO/serde_json-$VERSION/src/de.rs
+  |
+  | pub fn from_str<'a, T>(s: &'a str) -> Result<T>
+  |        -------- required by a bound in this function
+  | where
+  |     T: de::Deserialize<'a>,
+  |        ^^^^^^^^^^^^^^^^^^^ required by this bound in `from_str`
+
+error[E0277]: the trait bound `JournalBackedFailureHandle: serde::Deserialize<'de>` is not satisfied
+  --> tests/ui/deserialize_all_live_capabilities.rs:10:55
+   |
+10 |     let _failure_handle: JournalBackedFailureHandle = serde_json::from_str("{}").unwrap();
+   |                                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `serde_core::de::Deserialize<'_>` is not implemented for `JournalBackedFailureHandle`
+   |
+   = note: for local types consider adding `#[derive(serde::Deserialize)]` to your `JournalBackedFailureHandle` type
+   = note: for types from other crates check whether the crate offers a `serde` feature flag
+   = help: the following other types implement trait `serde_core::de::Deserialize<'de>`:
+             &'a Path
+             &'a [u8]
+             &'a str
+             ()
+             (T,)
+             (T0, T1)
+             (T0, T1, T2)
+             (T0, T1, T2, T3)
+           and $N others
+note: required by a bound in `serde_json::from_str`
+  --> $CARGO/serde_json-$VERSION/src/de.rs
+   |
+   | pub fn from_str<'a, T>(s: &'a str) -> Result<T>
+   |        -------- required by a bound in this function
+   | where
+   |     T: de::Deserialize<'a>,
+   |        ^^^^^^^^^^^^^^^^^^^ required by this bound in `from_str`
+
+error[E0277]: the trait bound `PromotionCapability: serde::Deserialize<'de>` is not satisfied
+  --> tests/ui/deserialize_all_live_capabilities.rs:11:43
+   |
+11 |     let _promotion: PromotionCapability = serde_json::from_str("{}").unwrap();
+   |                                           ^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `serde_core::de::Deserialize<'_>` is not implemented for `PromotionCapability`
+   |
+   = note: for local types consider adding `#[derive(serde::Deserialize)]` to your `PromotionCapability` type
+   = note: for types from other crates check whether the crate offers a `serde` feature flag
+   = help: the following other types implement trait `serde_core::de::Deserialize<'de>`:
+             &'a Path
+             &'a [u8]
+             &'a str
+             ()
+             (T,)
+             (T0, T1)
+             (T0, T1, T2)
+             (T0, T1, T2, T3)
+           and $N others
+note: required by a bound in `serde_json::from_str`
+  --> $CARGO/serde_json-$VERSION/src/de.rs
+   |
+   | pub fn from_str<'a, T>(s: &'a str) -> Result<T>
+   |        -------- required by a bound in this function
+   | where
+   |     T: de::Deserialize<'a>,
+   |        ^^^^^^^^^^^^^^^^^^^ required by this bound in `from_str`
+
+error[E0277]: the trait bound `PromotedConstraint: serde::Deserialize<'de>` is not satisfied
+  --> tests/ui/deserialize_all_live_capabilities.rs:12:43
+   |
+12 |     let _constraint: PromotedConstraint = serde_json::from_str("{}").unwrap();
+   |                                           ^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `serde_core::de::Deserialize<'_>` is not implemented for `PromotedConstraint`
+   |
+   = note: for local types consider adding `#[derive(serde::Deserialize)]` to your `PromotedConstraint` type
+   = note: for types from other crates check whether the crate offers a `serde` feature flag
+   = help: the following other types implement trait `serde_core::de::Deserialize<'de>`:
+             &'a Path
+             &'a [u8]
+             &'a str
+             ()
+             (T,)
+             (T0, T1)
+             (T0, T1, T2)
+             (T0, T1, T2, T3)
+           and $N others
+note: required by a bound in `serde_json::from_str`
+  --> $CARGO/serde_json-$VERSION/src/de.rs
+   |
+   | pub fn from_str<'a, T>(s: &'a str) -> Result<T>
+   |        -------- required by a bound in this function
+   | where
+   |     T: de::Deserialize<'a>,
+   |        ^^^^^^^^^^^^^^^^^^^ required by this bound in `from_str`

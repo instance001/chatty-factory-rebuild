@@ -1,0 +1,47 @@
+warning: unreachable expression
+ --> tests/ui/forge_promoted_constraint.rs:9:32
+  |
+8 |         approval_receipt: panic!("approval unavailable"),
+  |                           ------------------------------ any code following this expression is unreachable
+9 |         approval_receipt_hash: "hash".to_string(),
+  |                                ^^^^^^^^^^^^^^^^^^ unreachable expression
+  |
+  = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
+
+error[E0451]: fields `capability_id`, `approval_record_id`, `approval_record_hash`, `approval_receipt`, `approval_receipt_hash` and `candidate_receipt` of struct `PromotionCapability` are private
+  --> tests/ui/forge_promoted_constraint.rs:5:9
+   |
+ 4 |     let _forged_capability = PromotionCapability {
+   |                              ------------------- in this type
+ 5 |         capability_id: "cap-promotion-forged".to_string(),
+   |         ^^^^^^^^^^^^^ private field
+ 6 |         approval_record_id: "approval-record".to_string(),
+   |         ^^^^^^^^^^^^^^^^^^ private field
+ 7 |         approval_record_hash: "approval-record-hash".to_string(),
+   |         ^^^^^^^^^^^^^^^^^^^^ private field
+ 8 |         approval_receipt: panic!("approval unavailable"),
+   |         ^^^^^^^^^^^^^^^^ private field
+ 9 |         approval_receipt_hash: "hash".to_string(),
+   |         ^^^^^^^^^^^^^^^^^^^^^ private field
+10 |         candidate_receipt: panic!("candidate unavailable"),
+   |         ^^^^^^^^^^^^^^^^^ private field
+
+error[E0451]: fields `constraint_id`, `trace_id`, `request_id`, `scope`, `lock_signal`, `promotion_approval_receipt_id` and `promotion_approval_receipt_hash` of struct `PromotedConstraint` are private
+  --> tests/ui/forge_promoted_constraint.rs:13:9
+   |
+12 |     let _forged_constraint = PromotedConstraint {
+   |                              ------------------ in this type
+13 |         constraint_id: "constraint-forged".to_string(),
+   |         ^^^^^^^^^^^^^ private field
+14 |         trace_id: "trace-1".to_string(),
+   |         ^^^^^^^^ private field
+15 |         request_id: "request-1".to_string(),
+   |         ^^^^^^^^^^ private field
+16 |         scope: "write:README.md".to_string(),
+   |         ^^^^^ private field
+17 |         lock_signal: "write:README.md".to_string(),
+   |         ^^^^^^^^^^^ private field
+18 |         promotion_approval_receipt_id: "approval-forged".to_string(),
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ private field
+19 |         promotion_approval_receipt_hash: "hash".to_string(),
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ private field

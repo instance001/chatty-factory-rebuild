@@ -1,0 +1,14 @@
+error[E0432]: unresolved import `chatty_factory_rebuild::FactoryOutput`
+ --> tests/ui/headless_factory_output_unavailable.rs:1:5
+  |
+1 | use chatty_factory_rebuild::FactoryOutput;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no `FactoryOutput` in the root
+  |
+note: found an item that was configured out
+ --> src/lib.rs
+  |
+  | #[cfg(test)]
+  |       ---- the item is gated here
+  | #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+  | pub enum FactoryOutput {
+  |          ^^^^^^^^^^^^^

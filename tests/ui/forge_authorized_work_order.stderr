@@ -1,0 +1,21 @@
+warning: unreachable expression
+ --> tests/ui/forge_authorized_work_order.rs:6:23
+  |
+5 |         receipt: panic!("receipt unavailable"),
+  |                  ----------------------------- any code following this expression is unreachable
+6 |         receipt_hash: "hash".to_string(),
+  |                       ^^^^^^^^^^^^^^^^^^ unreachable expression
+  |
+  = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
+
+error: cannot construct `AuthorizedWorkOrderCapability` with struct literal syntax due to private fields
+ --> tests/ui/forge_authorized_work_order.rs:4:19
+  |
+4 |     let _forged = AuthorizedWorkOrderCapability {
+  |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+5 |         receipt: panic!("receipt unavailable"),
+  |         -------------------------------------- private field
+6 |         receipt_hash: "hash".to_string(),
+  |         -------------------------------- private field
+  |
+  = note: ...and other private fields `capability_id`, `work_order_record_id` and `work_order_record_hash` that were not provided

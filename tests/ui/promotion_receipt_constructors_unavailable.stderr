@@ -1,0 +1,40 @@
+error[E0432]: unresolved imports `chatty_factory_rebuild::approve_promotion_receipt`, `chatty_factory_rebuild::candidate_from_triangulation`
+ --> tests/ui/promotion_receipt_constructors_unavailable.rs:1:30
+  |
+1 | use chatty_factory_rebuild::{approve_promotion_receipt, candidate_from_triangulation};
+  |                              ^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no `candidate_from_triangulation` in the root
+  |                              |
+  |                              no `approve_promotion_receipt` in the root
+  |
+note: found an item that was configured out
+ --> src/lib.rs
+  |
+  | #[cfg(test)]
+  |       ---- the item is gated here
+  | fn approve_promotion_receipt(
+  |    ^^^^^^^^^^^^^^^^^^^^^^^^^
+note: found an item that was configured out
+ --> src/lib.rs
+  |
+  | #[cfg(test)]
+  |       ---- the item is gated here
+  | fn candidate_from_triangulation(
+  |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unreachable expression
+ --> tests/ui/promotion_receipt_constructors_unavailable.rs:4:73
+  |
+4 |     let _candidate = candidate_from_triangulation("candidate", todo!(), "tri-hash");
+  |                                                                -------  ^^^^^^^^^^ unreachable expression
+  |                                                                |
+  |                                                                any code following this expression is unreachable
+  |
+  = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: unreachable expression
+ --> tests/ui/promotion_receipt_constructors_unavailable.rs:5:68
+  |
+5 |     let _approval = approve_promotion_receipt("approval", todo!(), "candidate-hash", todo!());
+  |                                                           -------  ^^^^^^^^^^^^^^^^ unreachable expression
+  |                                                           |
+  |                                                           any code following this expression is unreachable

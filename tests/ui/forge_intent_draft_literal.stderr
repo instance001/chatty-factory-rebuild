@@ -1,0 +1,11 @@
+error[E0451]: fields `draft_id`, `exact_request` and `derived_claims` of struct `IntentDraft` are private
+  --> tests/ui/forge_intent_draft_literal.rs:13:9
+   |
+12 |     let _ = IntentDraft {
+   |             ----------- in this type
+13 |         draft_id: "draft".to_string(),
+   |         ^^^^^^^^ private field
+14 |         exact_request: ExactRequest::new("request", "hello"),
+   |         ^^^^^^^^^^^^^ private field
+15 |         derived_claims: vec![claim],
+   |         ^^^^^^^^^^^^^^ private field

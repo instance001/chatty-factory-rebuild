@@ -1,0 +1,165 @@
+error[E0451]: fields `receipt_id`, `trace_id`, `request_id`, `attempt_id`, `parent_receipt_id`, `parent_receipt_hash`, `failure_class`, `evidence` and `lock_signals` of struct `FailureEvidenceReceipt` are private
+  --> tests/ui/forge_failure_receipts_literal.rs:9:9
+   |
+ 8 |     let _failure = FailureEvidenceReceipt {
+   |                    ---------------------- in this type
+ 9 |         receipt_id: "failure-attempt-1".to_string(),
+   |         ^^^^^^^^^^ private field
+10 |         trace_id: "trace".to_string(),
+   |         ^^^^^^^^ private field
+11 |         request_id: "request".to_string(),
+   |         ^^^^^^^^^^ private field
+12 |         attempt_id: "attempt-1".to_string(),
+   |         ^^^^^^^^^^ private field
+13 |         parent_receipt_id: "verification-attempt-1".to_string(),
+   |         ^^^^^^^^^^^^^^^^^ private field
+14 |         parent_receipt_hash: "verification-hash".to_string(),
+   |         ^^^^^^^^^^^^^^^^^^^ private field
+15 |         failure_class: FailureClass::VerificationFailed,
+   |         ^^^^^^^^^^^^^ private field
+16 |         evidence: vec!["model said no".to_string()],
+   |         ^^^^^^^^ private field
+17 |         lock_signals: vec!["same-label".to_string()],
+   |         ^^^^^^^^^^^^ private field
+
+error[E0451]: fields `receipt_id`, `trace_id`, `request_id`, `attempt_id`, `failure_evidence_receipt_id`, `failure_evidence_receipt_hash`, `failure_class`, `evidence` and `lock_signals` of struct `VaultEntryReceipt` are private
+  --> tests/ui/forge_failure_receipts_literal.rs:21:9
+   |
+20 |     let _vault = VaultEntryReceipt {
+   |                  ----------------- in this type
+21 |         receipt_id: "vault-attempt-1".to_string(),
+   |         ^^^^^^^^^^ private field
+22 |         trace_id: "trace".to_string(),
+   |         ^^^^^^^^ private field
+23 |         request_id: "request".to_string(),
+   |         ^^^^^^^^^^ private field
+24 |         attempt_id: "attempt-1".to_string(),
+   |         ^^^^^^^^^^ private field
+25 |         failure_evidence_receipt_id: "failure-attempt-1".to_string(),
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^ private field
+26 |         failure_evidence_receipt_hash: "failure-hash".to_string(),
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ private field
+27 |         failure_class: FailureClass::VerificationFailed,
+   |         ^^^^^^^^^^^^^ private field
+28 |         evidence: vec!["model said no".to_string()],
+   |         ^^^^^^^^ private field
+29 |         lock_signals: vec!["same-label".to_string()],
+   |         ^^^^^^^^^^^^ private field
+
+error[E0451]: fields `receipt_id`, `trace_id`, `request_id`, `attempt_id`, `vault_entry_receipt_id`, `vault_entry_receipt_hash`, `scope`, `lock_signal` and `evidence` of struct `FailureObservationReceipt` are private
+  --> tests/ui/forge_failure_receipts_literal.rs:33:9
+   |
+32 |     let _observation = FailureObservationReceipt {
+   |                        ------------------------- in this type
+33 |         receipt_id: "observation-attempt-1".to_string(),
+   |         ^^^^^^^^^^ private field
+34 |         trace_id: "trace".to_string(),
+   |         ^^^^^^^^ private field
+35 |         request_id: "request".to_string(),
+   |         ^^^^^^^^^^ private field
+36 |         attempt_id: "attempt-1".to_string(),
+   |         ^^^^^^^^^^ private field
+37 |         vault_entry_receipt_id: "vault-attempt-1".to_string(),
+   |         ^^^^^^^^^^^^^^^^^^^^^^ private field
+38 |         vault_entry_receipt_hash: "vault-hash".to_string(),
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^ private field
+39 |         scope: "path".to_string(),
+   |         ^^^^^ private field
+40 |         lock_signal: "same-label".to_string(),
+   |         ^^^^^^^^^^^ private field
+41 |         evidence: vec!["model said no".to_string()],
+   |         ^^^^^^^^ private field
+
+error[E0451]: fields `receipt_id`, `trace_id`, `request_id`, `source_vault_record_ids`, `source_vault_record_hashes`, `source_attempt_ids`, `status`, `lock_signal`, `isolated_fault_condition` and `reason` of struct `chatty_factory_rebuild::TriangulationReceipt` are private
+  --> tests/ui/forge_failure_receipts_literal.rs:45:9
+   |
+44 |     let _triangulation = TriangulationReceipt {
+   |                          -------------------- in this type
+45 |         receipt_id: "triangulation-1".to_string(),
+   |         ^^^^^^^^^^ private field
+46 |         trace_id: "trace".to_string(),
+   |         ^^^^^^^^ private field
+47 |         request_id: "request".to_string(),
+   |         ^^^^^^^^^^ private field
+48 |         source_vault_record_ids: vec!["vault-record-1".to_string(), "vault-record-2".to_string()],
+   |         ^^^^^^^^^^^^^^^^^^^^^^^ private field
+49 |         source_vault_record_hashes: vec!["hash-1".to_string(), "hash-2".to_string()],
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^ private field
+50 |         source_attempt_ids: vec!["attempt-1".to_string(), "attempt-2".to_string()],
+   |         ^^^^^^^^^^^^^^^^^^ private field
+51 |         status: TriangulationStatus::Isolated,
+   |         ^^^^^^ private field
+52 |         lock_signal: Some("same-label".to_string()),
+   |         ^^^^^^^^^^^ private field
+53 |         isolated_fault_condition: Some("specific bounded condition".to_string()),
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^ private field
+54 |         reason: Some("caller made a law".to_string()),
+   |         ^^^^^^ private field
+
+error[E0451]: fields `receipt_id`, `trace_id`, `request_id`, `triangulation_receipt_id`, `triangulation_receipt_hash`, `source_vault_record_ids`, `source_vault_record_hashes`, `scope`, `lock_signal` and `isolated_fault_condition` of struct `ConstraintPromotionCandidateReceipt` are private
+  --> tests/ui/forge_failure_receipts_literal.rs:58:9
+   |
+57 |     let _candidate = ConstraintPromotionCandidateReceipt {
+   |                      ----------------------------------- in this type
+58 |         receipt_id: "candidate-1".to_string(),
+   |         ^^^^^^^^^^ private field
+59 |         trace_id: "trace".to_string(),
+   |         ^^^^^^^^ private field
+60 |         request_id: "request".to_string(),
+   |         ^^^^^^^^^^ private field
+61 |         triangulation_receipt_id: "triangulation-1".to_string(),
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^ private field
+62 |         triangulation_receipt_hash: "triangulation-hash".to_string(),
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^ private field
+63 |         source_vault_record_ids: vec!["vault-record-1".to_string(), "vault-record-2".to_string()],
+   |         ^^^^^^^^^^^^^^^^^^^^^^^ private field
+64 |         source_vault_record_hashes: vec!["hash-1".to_string(), "hash-2".to_string()],
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^ private field
+65 |         scope: "global".to_string(),
+   |         ^^^^^ private field
+66 |         lock_signal: "same-label".to_string(),
+   |         ^^^^^^^^^^^ private field
+67 |         isolated_fault_condition: "specific bounded condition".to_string(),
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^ private field
+
+error[E0451]: fields `receipt_id`, `trace_id`, `request_id`, `candidate_receipt_id`, `candidate_receipt_hash` and `approval_assertion` of struct `PromotionApprovalReceipt` are private
+  --> tests/ui/forge_failure_receipts_literal.rs:71:9
+   |
+70 |     let _approval = PromotionApprovalReceipt {
+   |                     ------------------------ in this type
+71 |         receipt_id: "approval-1".to_string(),
+   |         ^^^^^^^^^^ private field
+72 |         trace_id: "trace".to_string(),
+   |         ^^^^^^^^ private field
+73 |         request_id: "request".to_string(),
+   |         ^^^^^^^^^^ private field
+74 |         candidate_receipt_id: "candidate-1".to_string(),
+   |         ^^^^^^^^^^^^^^^^^^^^ private field
+75 |         candidate_receipt_hash: "candidate-hash".to_string(),
+   |         ^^^^^^^^^^^^^^^^^^^^^^ private field
+76 |         approval_assertion: external_operator_assertion("promotion"),
+   |         ^^^^^^^^^^^^^^^^^^ private field
+
+error[E0451]: fields `receipt_id`, `trace_id`, `request_id`, `capability_id`, `consumed_for`, `consumed_receipt_id`, `consumed_receipt_hash`, `consumed_record_id` and `consumed_record_hash` of struct `CapabilitySpendReceipt` are private
+  --> tests/ui/forge_failure_receipts_literal.rs:80:9
+   |
+79 |     let _spend = CapabilitySpendReceipt {
+   |                  ---------------------- in this type
+80 |         receipt_id: "spend-1".to_string(),
+   |         ^^^^^^^^^^ private field
+81 |         trace_id: "trace".to_string(),
+   |         ^^^^^^^^ private field
+82 |         request_id: "request".to_string(),
+   |         ^^^^^^^^^^ private field
+83 |         capability_id: "capability-1".to_string(),
+   |         ^^^^^^^^^^^^^ private field
+84 |         consumed_for: "execution".to_string(),
+   |         ^^^^^^^^^^^^ private field
+85 |         consumed_receipt_id: "receipt-1".to_string(),
+   |         ^^^^^^^^^^^^^^^^^^^ private field
+86 |         consumed_receipt_hash: "receipt-hash".to_string(),
+   |         ^^^^^^^^^^^^^^^^^^^^^ private field
+87 |         consumed_record_id: "record-1".to_string(),
+   |         ^^^^^^^^^^^^^^^^^^ private field
+88 |         consumed_record_hash: "record-hash".to_string(),
+   |         ^^^^^^^^^^^^^^^^^^^^ private field

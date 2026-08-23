@@ -1,0 +1,168 @@
+error[E0624]: method `append_request` is private
+ --> tests/ui/fabricated_typed_appends.rs:5:21
+  |
+5 |     let _ = journal.append_request(&ExactRequest::new("request", "text"));
+  |                     ^^^^^^^^^^^^^^ private method
+  |
+ ::: src/lib.rs
+  |
+  |     fn append_request(&self, request: &ExactRequest) -> Result<RuntimeRecordEnvelope, String> {
+  |     ----------------------------------------------------------------------------------------- private method defined here
+
+error[E0624]: method `append_confirmed_intent_receipt` is private
+ --> tests/ui/fabricated_typed_appends.rs:6:21
+  |
+6 |       let _ = journal.append_confirmed_intent_receipt(String::new(), todo!());
+  |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ private method
+  |
+ ::: src/lib.rs
+  |
+  | /     fn append_confirmed_intent_receipt(
+  | |         &self,
+  | |         parent_request_record_id: String,
+  | |         intent: &ConfirmedIntentCapability,
+  | |     ) -> Result<RuntimeRecordEnvelope, String> {
+  | |______________________________________________- private method defined here
+
+warning: unreachable call
+ --> tests/ui/fabricated_typed_appends.rs:6:21
+  |
+6 |     let _ = journal.append_confirmed_intent_receipt(String::new(), todo!());
+  |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^                ------- any code following this expression is unreachable
+  |                     |
+  |                     unreachable call
+  |
+  = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
+
+error[E0624]: method `append_proposal` is private
+ --> tests/ui/fabricated_typed_appends.rs:7:21
+  |
+7 |       let _ = journal.append_proposal("attempt", String::new(), todo!());
+  |                       ^^^^^^^^^^^^^^^ private method
+  |
+ ::: src/lib.rs
+  |
+  | /     fn append_proposal(
+  | |         &self,
+  | |         attempt_id: &str,
+  | |         parent_confirmed_intent_record_id: String,
+  | |         proposal: &MethodProposal,
+  | |     ) -> Result<RuntimeRecordEnvelope, String> {
+  | |______________________________________________- private method defined here
+
+warning: unreachable call
+ --> tests/ui/fabricated_typed_appends.rs:7:21
+  |
+7 |     let _ = journal.append_proposal("attempt", String::new(), todo!());
+  |                     ^^^^^^^^^^^^^^^ unreachable call          ------- any code following this expression is unreachable
+
+error[E0624]: method `append_gate_receipt` is private
+ --> tests/ui/fabricated_typed_appends.rs:8:21
+  |
+8 |       let _ = journal.append_gate_receipt(String::new(), todo!());
+  |                       ^^^^^^^^^^^^^^^^^^^ private method
+  |
+ ::: src/lib.rs
+  |
+  | /     fn append_gate_receipt(
+  | |         &self,
+  | |         parent_proposal_record_id: String,
+  | |         receipt: &GateReceipt,
+  | |     ) -> Result<RuntimeRecordEnvelope, String> {
+  | |______________________________________________- private method defined here
+
+warning: unreachable call
+ --> tests/ui/fabricated_typed_appends.rs:8:21
+  |
+8 |     let _ = journal.append_gate_receipt(String::new(), todo!());
+  |                     ^^^^^^^^^^^^^^^^^^^                ------- any code following this expression is unreachable
+  |                     |
+  |                     unreachable call
+
+error[E0624]: method `append_execution_receipt` is private
+ --> tests/ui/fabricated_typed_appends.rs:9:21
+  |
+9 |       let _ = journal.append_execution_receipt(String::new(), todo!());
+  |                       ^^^^^^^^^^^^^^^^^^^^^^^^ private method
+  |
+ ::: src/lib.rs
+  |
+  | /     fn append_execution_receipt(
+  | |         &self,
+  | |         parent_work_order_record_id: String,
+  | |         receipt: &ExecutionReceipt,
+  | |     ) -> Result<RuntimeRecordEnvelope, String> {
+  | |______________________________________________- private method defined here
+
+warning: unreachable call
+ --> tests/ui/fabricated_typed_appends.rs:9:21
+  |
+9 |     let _ = journal.append_execution_receipt(String::new(), todo!());
+  |                     ^^^^^^^^^^^^^^^^^^^^^^^^                ------- any code following this expression is unreachable
+  |                     |
+  |                     unreachable call
+
+error[E0624]: method `append_vault_entry` is private
+  --> tests/ui/fabricated_typed_appends.rs:10:21
+   |
+10 |       let _ = journal.append_vault_entry(String::new(), todo!());
+   |                       ^^^^^^^^^^^^^^^^^^ private method
+   |
+  ::: src/lib.rs
+   |
+   | /     fn append_vault_entry(
+   | |         &self,
+   | |         parent_failure_record_id: String,
+   | |         receipt: &VaultEntryReceipt,
+   | |     ) -> Result<RuntimeRecordEnvelope, String> {
+   | |______________________________________________- private method defined here
+
+warning: unreachable call
+  --> tests/ui/fabricated_typed_appends.rs:10:21
+   |
+10 |     let _ = journal.append_vault_entry(String::new(), todo!());
+   |                     ^^^^^^^^^^^^^^^^^^                ------- any code following this expression is unreachable
+   |                     |
+   |                     unreachable call
+
+error[E0599]: no method named `append_triangulation_receipt` found for struct `RuntimeJournal` in the current scope
+  --> tests/ui/fabricated_typed_appends.rs:11:21
+   |
+11 |     let _ = journal.append_triangulation_receipt(vec![], todo!());
+   |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method not found in `RuntimeJournal`
+
+warning: unreachable call
+  --> tests/ui/fabricated_typed_appends.rs:11:21
+   |
+11 |     let _ = journal.append_triangulation_receipt(vec![], todo!());
+   |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^         ------- any code following this expression is unreachable
+   |                     |
+   |                     unreachable call
+
+error[E0599]: no method named `append_promotion_candidate` found for struct `RuntimeJournal` in the current scope
+  --> tests/ui/fabricated_typed_appends.rs:12:21
+   |
+12 |     let _ = journal.append_promotion_candidate(String::new(), todo!());
+   |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^ method not found in `RuntimeJournal`
+
+warning: unreachable call
+  --> tests/ui/fabricated_typed_appends.rs:12:21
+   |
+12 |     let _ = journal.append_promotion_candidate(String::new(), todo!());
+   |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^                ------- any code following this expression is unreachable
+   |                     |
+   |                     unreachable call
+
+error[E0599]: no method named `append_promotion_approval` found for struct `RuntimeJournal` in the current scope
+  --> tests/ui/fabricated_typed_appends.rs:13:21
+   |
+13 |     let _ = journal.append_promotion_approval(String::new(), todo!());
+   |                     ^^^^^^^^^^^^^^^^^^^^^^^^^ method not found in `RuntimeJournal`
+
+warning: unreachable call
+  --> tests/ui/fabricated_typed_appends.rs:13:21
+   |
+13 |     let _ = journal.append_promotion_approval(String::new(), todo!());
+   |                     ^^^^^^^^^^^^^^^^^^^^^^^^^                ------- any code following this expression is unreachable
+   |                     |
+   |                     unreachable call

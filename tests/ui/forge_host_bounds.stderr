@@ -1,0 +1,5 @@
+error[E0616]: field `max_steps` of struct `HostBounds` is private
+ --> tests/ui/forge_host_bounds.rs:5:12
+  |
+5 |     bounds.max_steps = 99;
+  |            ^^^^^^^^^ private field

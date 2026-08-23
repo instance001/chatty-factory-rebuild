@@ -1,0 +1,5 @@
+error[E0616]: field `derived_claims` of struct `IntentDraft` is private
+  --> tests/ui/forge_intent_draft.rs:13:11
+   |
+13 |     draft.derived_claims = vec![];
+   |           ^^^^^^^^^^^^^^ private field

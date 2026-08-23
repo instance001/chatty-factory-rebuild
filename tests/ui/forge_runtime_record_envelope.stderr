@@ -1,0 +1,5 @@
+error[E0616]: field `payload` of struct `RuntimeRecordEnvelope` is private
+  --> tests/ui/forge_runtime_record_envelope.rs:17:12
+   |
+17 |     record.payload = serde_json::json!({"modified": true});
+   |            ^^^^^^^ private field

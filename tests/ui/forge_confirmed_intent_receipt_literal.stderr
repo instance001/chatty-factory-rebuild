@@ -1,0 +1,13 @@
+error[E0451]: fields `receipt_id`, `exact_request`, `derived_claims` and `confirmation_assertion` of struct `chatty_factory_rebuild::ConfirmedIntentReceipt` are private
+  --> tests/ui/forge_confirmed_intent_receipt_literal.rs:15:9
+   |
+14 |     let _ = ConfirmedIntentReceipt {
+   |             ---------------------- in this type
+15 |         receipt_id: "caller-picked".to_string(),
+   |         ^^^^^^^^^^ private field
+16 |         exact_request: request,
+   |         ^^^^^^^^^^^^^ private field
+17 |         derived_claims: vec![claim],
+   |         ^^^^^^^^^^^^^^ private field
+18 |         confirmation_assertion: external_operator_assertion("operator"),
+   |         ^^^^^^^^^^^^^^^^^^^^^^ private field

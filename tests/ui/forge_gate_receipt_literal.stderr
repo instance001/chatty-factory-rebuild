@@ -1,0 +1,29 @@
+error[E0451]: fields `receipt_id`, `trace_id`, `request_id`, `request_hash`, `confirmed_intent_receipt_id`, `confirmed_intent_receipt_hash`, `attempt_id`, `proposal_id`, `proposal_hash`, `admissible`, `reasons` and `blocked_by_constraint_ids` of struct `chatty_factory_rebuild::GateReceipt` are private
+  --> tests/ui/forge_gate_receipt_literal.rs:5:9
+   |
+ 4 |     let _ = GateReceipt {
+   |             ----------- in this type
+ 5 |         receipt_id: "gate-attempt-1".to_string(),
+   |         ^^^^^^^^^^ private field
+ 6 |         trace_id: "trace".to_string(),
+   |         ^^^^^^^^ private field
+ 7 |         request_id: "request".to_string(),
+   |         ^^^^^^^^^^ private field
+ 8 |         request_hash: "request-hash".to_string(),
+   |         ^^^^^^^^^^^^ private field
+ 9 |         confirmed_intent_receipt_id: "confirmed".to_string(),
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^ private field
+10 |         confirmed_intent_receipt_hash: "confirmed-hash".to_string(),
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ private field
+11 |         attempt_id: "attempt-1".to_string(),
+   |         ^^^^^^^^^^ private field
+12 |         proposal_id: "proposal".to_string(),
+   |         ^^^^^^^^^^^ private field
+13 |         proposal_hash: "proposal-hash".to_string(),
+   |         ^^^^^^^^^^^^^ private field
+14 |         admissible: true,
+   |         ^^^^^^^^^^ private field
+15 |         reasons: vec![],
+   |         ^^^^^^^ private field
+16 |         blocked_by_constraint_ids: vec![],
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^ private field

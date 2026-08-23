@@ -1,0 +1,23 @@
+error[E0451]: fields `receipt_id`, `trace_id`, `request_id`, `attempt_id`, `execution_receipt_id`, `execution_receipt_hash`, `success`, `checked_claim_ids` and `evidence` of struct `chatty_factory_rebuild::VerificationReceipt` are private
+  --> tests/ui/forge_verification_receipt_literal.rs:5:9
+   |
+ 4 |     let _ = VerificationReceipt {
+   |             ------------------- in this type
+ 5 |         receipt_id: "verification-attempt-1".to_string(),
+   |         ^^^^^^^^^^ private field
+ 6 |         trace_id: "trace".to_string(),
+   |         ^^^^^^^^ private field
+ 7 |         request_id: "request".to_string(),
+   |         ^^^^^^^^^^ private field
+ 8 |         attempt_id: "attempt-1".to_string(),
+   |         ^^^^^^^^^^ private field
+ 9 |         execution_receipt_id: "execution-attempt-1".to_string(),
+   |         ^^^^^^^^^^^^^^^^^^^^ private field
+10 |         execution_receipt_hash: "execution-hash".to_string(),
+   |         ^^^^^^^^^^^^^^^^^^^^^^ private field
+11 |         success: true,
+   |         ^^^^^^^ private field
+12 |         checked_claim_ids: vec!["claim".to_string()],
+   |         ^^^^^^^^^^^^^^^^^ private field
+13 |         evidence: vec!["model said it passed".to_string()],
+   |         ^^^^^^^^ private field

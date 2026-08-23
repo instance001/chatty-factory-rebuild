@@ -1,0 +1,5 @@
+error[E0616]: field `text` of struct `IntentClaim` is private
+  --> tests/ui/forge_intent_claim.rs:10:11
+   |
+10 |     claim.text = "changed".to_string();
+   |           ^^^^ private field

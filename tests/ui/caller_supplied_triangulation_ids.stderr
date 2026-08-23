@@ -1,0 +1,27 @@
+warning: unreachable expression
+ --> tests/ui/caller_supplied_triangulation_ids.rs:4:64
+  |
+4 |     let _ = triangulate_failures("caller-picked-tri", todo!(), todo!());
+  |                                                       -------  ^^^^^^^ unreachable expression
+  |                                                       |
+  |                                                       any code following this expression is unreachable
+  |
+  = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
+  = note: this warning originates in the macro `todo` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0061]: this function takes 2 arguments but 3 arguments were supplied
+ --> tests/ui/caller_supplied_triangulation_ids.rs:4:13
+  |
+4 |     let _ = triangulate_failures("caller-picked-tri", todo!(), todo!());
+  |             ^^^^^^^^^^^^^^^^^^^^ ------------------- unexpected argument #1 of type `&'static str`
+  |
+note: function defined here
+ --> src/lib.rs
+  |
+  | pub fn triangulate_failures(
+  |        ^^^^^^^^^^^^^^^^^^^^
+help: remove the extra argument
+  |
+4 -     let _ = triangulate_failures("caller-picked-tri", todo!(), todo!());
+4 +     let _ = triangulate_failures(todo!(), todo!());
+  |

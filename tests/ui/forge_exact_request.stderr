@@ -1,0 +1,5 @@
+error[E0616]: field `bytes_sha256` of struct `ExactRequest` is private
+  --> tests/ui/forge_exact_request.rs:10:13
+   |
+10 |     request.bytes_sha256 = "modified-hash".to_string();
+   |             ^^^^^^^^^^^^ private field

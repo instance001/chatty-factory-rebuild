@@ -1,0 +1,5 @@
+error[E0616]: field `executed_steps` of struct `chatty_factory_rebuild::ExecutionReceipt` is private
+ --> tests/ui/forge_execution_receipt.rs:8:15
+  |
+8 |     execution.executed_steps = 99;
+  |               ^^^^^^^^^^^^^^ private field

@@ -1,0 +1,24 @@
+error[E0432]: unresolved import `chatty_factory_rebuild::isolate_bounded_fault_condition`
+ --> tests/ui/direct_isolated_triangulation_unavailable.rs:1:5
+  |
+1 | use chatty_factory_rebuild::isolate_bounded_fault_condition;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no `isolate_bounded_fault_condition` in the root
+  |
+note: found an item that was configured out
+ --> src/lib.rs
+  |
+  | #[cfg(test)]
+  |       ---- the item is gated here
+  | fn isolate_bounded_fault_condition(
+  |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unreachable expression
+ --> tests/ui/direct_isolated_triangulation_unavailable.rs:4:54
+  |
+4 |     let _ = isolate_bounded_fault_condition(todo!(), todo!(), "specific bounded fault");
+  |                                             -------  ^^^^^^^ unreachable expression
+  |                                             |
+  |                                             any code following this expression is unreachable
+  |
+  = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
+  = note: this warning originates in the macro `todo` (in Nightly builds, run with -Z macro-backtrace for more info)

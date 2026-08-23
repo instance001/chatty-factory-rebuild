@@ -1,0 +1,27 @@
+error[E0451]: fields `record_id`, `sequence_number`, `record_kind`, `trace_id`, `request_id`, `attempt_id`, `parent_record_ids`, `previous_record_hash`, `payload_hash`, `payload` and `record_hash` of struct `RuntimeRecordEnvelope` are private
+  --> tests/ui/forge_runtime_record_envelope_literal.rs:5:9
+   |
+ 4 |     let _ = RuntimeRecordEnvelope {
+   |             --------------------- in this type
+ 5 |         record_id: "triangulation-0".to_string(),
+   |         ^^^^^^^^^ private field
+ 6 |         sequence_number: 0,
+   |         ^^^^^^^^^^^^^^^ private field
+ 7 |         record_kind: RuntimeRecordKind::TriangulationReceipt,
+   |         ^^^^^^^^^^^ private field
+ 8 |         trace_id: "trace".to_string(),
+   |         ^^^^^^^^ private field
+ 9 |         request_id: "request".to_string(),
+   |         ^^^^^^^^^^ private field
+10 |         attempt_id: None,
+   |         ^^^^^^^^^^ private field
+11 |         parent_record_ids: vec![],
+   |         ^^^^^^^^^^^^^^^^^ private field
+12 |         previous_record_hash: None,
+   |         ^^^^^^^^^^^^^^^^^^^^ private field
+13 |         payload_hash: "payload-hash".to_string(),
+   |         ^^^^^^^^^^^^ private field
+14 |         payload: serde_json::json!({"forged": true}),
+   |         ^^^^^^^ private field
+15 |         record_hash: "record-hash".to_string(),
+   |         ^^^^^^^^^^^ private field

@@ -1,0 +1,11 @@
+error[E0451]: fields `assertion_id`, `asserted_context` and `statement` of struct `ExternalOperatorAssertionReceipt` are private
+ --> tests/ui/forge_external_operator_assertion.rs:5:9
+  |
+4 |     let _ = ExternalOperatorAssertionReceipt {
+  |             -------------------------------- in this type
+5 |         assertion_id: "caller-picked".to_string(),
+  |         ^^^^^^^^^^^^ private field
+6 |         asserted_context: "operator-confirmation".to_string(),
+  |         ^^^^^^^^^^^^^^^^ private field
+7 |         statement: "cryptographically verified human identity".to_string(),
+  |         ^^^^^^^^^ private field

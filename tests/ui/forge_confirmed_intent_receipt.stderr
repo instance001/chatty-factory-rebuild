@@ -1,0 +1,5 @@
+error[E0616]: field `receipt_id` of struct `chatty_factory_rebuild::ConfirmedIntentReceipt` is private
+  --> tests/ui/forge_confirmed_intent_receipt.rs:17:13
+   |
+17 |     receipt.receipt_id = "caller-picked".to_string();
+   |             ^^^^^^^^^^ private field

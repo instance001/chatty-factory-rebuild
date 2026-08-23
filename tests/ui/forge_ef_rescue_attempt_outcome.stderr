@@ -1,0 +1,43 @@
+error[E0639]: cannot create non-exhaustive variant using struct expression
+ --> tests/ui/forge_ef_rescue_attempt_outcome.rs:4:13
+  |
+4 |       let _ = EfRescueAttemptOutcome::Artifact {
+  |  _____________^
+5 | |         execution_record_id: "execution-record".to_string(),
+6 | |         verification_record_id: "verification-record".to_string(),
+7 | |         execution: todo!(),
+8 | |         verification: todo!(),
+9 | |     };
+  | |_____^
+
+warning: unreachable expression
+ --> tests/ui/forge_ef_rescue_attempt_outcome.rs:8:23
+  |
+7 |         execution: todo!(),
+  |                    ------- any code following this expression is unreachable
+8 |         verification: todo!(),
+  |                       ^^^^^^^ unreachable expression
+  |
+  = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
+  = note: this warning originates in the macro `todo` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0639]: cannot create non-exhaustive variant using struct expression
+  --> tests/ui/forge_ef_rescue_attempt_outcome.rs:11:13
+   |
+11 |       let _ = EfRescueAttemptOutcome::UnresolvedFailure {
+   |  _____________^
+12 | |         failure_class: todo!(),
+13 | |         gate_record_id: "gate-record".to_string(),
+14 | |         failure_record_id: "failure-record".to_string(),
+...  |
+20 | |         observation: todo!(),
+21 | |     };
+   | |_____^
+
+warning: unreachable expression
+  --> tests/ui/forge_ef_rescue_attempt_outcome.rs:13:25
+   |
+12 |         failure_class: todo!(),
+   |                        ------- any code following this expression is unreachable
+13 |         gate_record_id: "gate-record".to_string(),
+   |                         ^^^^^^^^^^^^^^^^^^^^^^^^^ unreachable expression

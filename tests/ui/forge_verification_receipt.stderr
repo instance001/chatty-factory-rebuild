@@ -1,0 +1,5 @@
+error[E0616]: field `success` of struct `chatty_factory_rebuild::VerificationReceipt` is private
+ --> tests/ui/forge_verification_receipt.rs:8:18
+  |
+8 |     verification.success = true;
+  |                  ^^^^^^^ private field

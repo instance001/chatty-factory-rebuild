@@ -1,0 +1,5 @@
+error[E0616]: field `exact_text` of struct `SourceSpan` is private
+ --> tests/ui/forge_source_span.rs:5:10
+  |
+5 |     span.exact_text = "changed".to_string();
+  |          ^^^^^^^^^^ private field

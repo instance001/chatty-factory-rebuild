@@ -1,0 +1,13 @@
+error[E0451]: fields `claim_id`, `kind`, `text` and `source_spans` of struct `IntentClaim` are private
+ --> tests/ui/forge_intent_claim_literal.rs:5:9
+  |
+4 |     let _ = IntentClaim {
+  |             ----------- in this type
+5 |         claim_id: "claim".to_string(),
+  |         ^^^^^^^^ private field
+6 |         kind: IntentClaimKind::AcceptanceCriterion,
+  |         ^^^^ private field
+7 |         text: "file_contains:README.md::hello".to_string(),
+  |         ^^^^ private field
+8 |         source_spans: vec![SourceSpan::new(0, 5, "hello")],
+  |         ^^^^^^^^^^^^ private field

@@ -1,0 +1,5 @@
+error[E0599]: no method named `append_record` found for struct `RuntimeJournal` in the current scope
+ --> tests/ui/arbitrary_append_record.rs:5:21
+  |
+5 |     let _ = journal.append_record(
+  |             --------^^^^^^^^^^^^^ method not found in `RuntimeJournal`

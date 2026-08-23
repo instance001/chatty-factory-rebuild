@@ -1,0 +1,41 @@
+error[E0616]: field `evidence` of struct `FailureEvidenceReceipt` is private
+  --> tests/ui/forge_failure_receipts.rs:13:13
+   |
+13 |     failure.evidence = vec!["caller rewrote failure evidence".to_string()];
+   |             ^^^^^^^^ private field
+
+error[E0616]: field `lock_signals` of struct `VaultEntryReceipt` is private
+  --> tests/ui/forge_failure_receipts.rs:17:11
+   |
+17 |     vault.lock_signals = vec!["caller rewrote vault lock".to_string()];
+   |           ^^^^^^^^^^^^ private field
+
+error[E0616]: field `scope` of struct `FailureObservationReceipt` is private
+  --> tests/ui/forge_failure_receipts.rs:21:17
+   |
+21 |     observation.scope = "caller/wide".to_string();
+   |                 ^^^^^ private field
+
+error[E0616]: field `reason` of struct `chatty_factory_rebuild::TriangulationReceipt` is private
+  --> tests/ui/forge_failure_receipts.rs:25:19
+   |
+25 |     triangulation.reason = Some("caller resolved it".to_string());
+   |                   ^^^^^^ private field
+
+error[E0616]: field `scope` of struct `ConstraintPromotionCandidateReceipt` is private
+  --> tests/ui/forge_failure_receipts.rs:29:15
+   |
+29 |     candidate.scope = "caller/global".to_string();
+   |               ^^^^^ private field
+
+error[E0616]: field `candidate_receipt_hash` of struct `PromotionApprovalReceipt` is private
+  --> tests/ui/forge_failure_receipts.rs:33:14
+   |
+33 |     approval.candidate_receipt_hash = "caller-approved".to_string();
+   |              ^^^^^^^^^^^^^^^^^^^^^^ private field
+
+error[E0616]: field `consumed_for` of struct `CapabilitySpendReceipt` is private
+  --> tests/ui/forge_failure_receipts.rs:37:11
+   |
+37 |     spend.consumed_for = "caller-replay".to_string();
+   |           ^^^^^^^^^^^^ private field

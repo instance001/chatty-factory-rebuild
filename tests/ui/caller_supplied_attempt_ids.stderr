@@ -1,0 +1,62 @@
+warning: unreachable expression
+ --> tests/ui/caller_supplied_attempt_ids.rs:5:77
+  |
+5 |     let _ = journal.issue_allowed_attempt("caller-picked-attempt", todo!(), todo!(), todo!(), &[]);
+  |                                                                    -------  ^^^^^^^ unreachable expression
+  |                                                                    |
+  |                                                                    any code following this expression is unreachable
+  |
+  = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
+  = note: this warning originates in the macro `todo` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0061]: this method takes 4 arguments but 5 arguments were supplied
+ --> tests/ui/caller_supplied_attempt_ids.rs:5:21
+  |
+5 |     let _ = journal.issue_allowed_attempt("caller-picked-attempt", todo!(), todo!(), todo!(), &[]);
+  |                     ^^^^^^^^^^^^^^^^^^^^^ -----------------------                             --- unexpected argument #5 of type `&[_; 0]`
+  |                                           |
+  |                                           expected `&ConfirmedIntentCapability`, found `&str`
+  |
+  = note: expected reference `&ConfirmedIntentCapability`
+             found reference `&'static str`
+note: method defined here
+ --> src/lib.rs
+  |
+  |     pub fn issue_allowed_attempt(
+  |            ^^^^^^^^^^^^^^^^^^^^^
+help: remove the extra argument
+  |
+5 -     let _ = journal.issue_allowed_attempt("caller-picked-attempt", todo!(), todo!(), todo!(), &[]);
+5 +     let _ = journal.issue_allowed_attempt(/* &ConfirmedIntentCapability */, todo!(), todo!(), todo!());
+  |
+
+warning: unreachable expression
+ --> tests/ui/caller_supplied_attempt_ids.rs:6:77
+  |
+6 |     let _ = journal.run_ef_rescue_attempt("caller-picked-attempt", todo!(), todo!(), todo!(), &[]);
+  |                                                                    -------  ^^^^^^^ unreachable expression
+  |                                                                    |
+  |                                                                    any code following this expression is unreachable
+  |
+  = note: this warning originates in the macro `todo` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0061]: this method takes 4 arguments but 5 arguments were supplied
+ --> tests/ui/caller_supplied_attempt_ids.rs:6:21
+  |
+6 |     let _ = journal.run_ef_rescue_attempt("caller-picked-attempt", todo!(), todo!(), todo!(), &[]);
+  |                     ^^^^^^^^^^^^^^^^^^^^^ -----------------------                             --- unexpected argument #5 of type `&[_; 0]`
+  |                                           |
+  |                                           expected `&ConfirmedIntentCapability`, found `&str`
+  |
+  = note: expected reference `&ConfirmedIntentCapability`
+             found reference `&'static str`
+note: method defined here
+ --> src/lib.rs
+  |
+  |     pub fn run_ef_rescue_attempt(
+  |            ^^^^^^^^^^^^^^^^^^^^^
+help: remove the extra argument
+  |
+6 -     let _ = journal.run_ef_rescue_attempt("caller-picked-attempt", todo!(), todo!(), todo!(), &[]);
+6 +     let _ = journal.run_ef_rescue_attempt(/* &ConfirmedIntentCapability */, todo!(), todo!(), todo!());
+  |

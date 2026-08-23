@@ -1,0 +1,143 @@
+error[E0277]: the trait bound `ConfirmedIntentCapability: Default` is not satisfied
+  --> tests/ui/live_authority_default_copy.rs:10:22
+   |
+10 |     assert_default::<ConfirmedIntentCapability>();
+   |                      ^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `Default` is not implemented for `ConfirmedIntentCapability`
+   |
+note: required by a bound in `assert_default`
+  --> tests/ui/live_authority_default_copy.rs:6:22
+   |
+ 6 | fn assert_default<T: Default>() {}
+   |                      ^^^^^^^ required by this bound in `assert_default`
+
+error[E0277]: the trait bound `AllowedAttemptCapability: Default` is not satisfied
+  --> tests/ui/live_authority_default_copy.rs:11:22
+   |
+11 |     assert_default::<AllowedAttemptCapability>();
+   |                      ^^^^^^^^^^^^^^^^^^^^^^^^ the trait `Default` is not implemented for `AllowedAttemptCapability`
+   |
+note: required by a bound in `assert_default`
+  --> tests/ui/live_authority_default_copy.rs:6:22
+   |
+ 6 | fn assert_default<T: Default>() {}
+   |                      ^^^^^^^ required by this bound in `assert_default`
+
+error[E0277]: the trait bound `AuthorizedWorkOrderCapability: Default` is not satisfied
+  --> tests/ui/live_authority_default_copy.rs:12:22
+   |
+12 |     assert_default::<AuthorizedWorkOrderCapability>();
+   |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `Default` is not implemented for `AuthorizedWorkOrderCapability`
+   |
+note: required by a bound in `assert_default`
+  --> tests/ui/live_authority_default_copy.rs:6:22
+   |
+ 6 | fn assert_default<T: Default>() {}
+   |                      ^^^^^^^ required by this bound in `assert_default`
+
+error[E0277]: the trait bound `JournalBackedFailureHandle: Default` is not satisfied
+  --> tests/ui/live_authority_default_copy.rs:13:22
+   |
+13 |     assert_default::<JournalBackedFailureHandle>();
+   |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `Default` is not implemented for `JournalBackedFailureHandle`
+   |
+note: required by a bound in `assert_default`
+  --> tests/ui/live_authority_default_copy.rs:6:22
+   |
+ 6 | fn assert_default<T: Default>() {}
+   |                      ^^^^^^^ required by this bound in `assert_default`
+
+error[E0277]: the trait bound `PromotionCapability: Default` is not satisfied
+  --> tests/ui/live_authority_default_copy.rs:14:22
+   |
+14 |     assert_default::<PromotionCapability>();
+   |                      ^^^^^^^^^^^^^^^^^^^ the trait `Default` is not implemented for `PromotionCapability`
+   |
+note: required by a bound in `assert_default`
+  --> tests/ui/live_authority_default_copy.rs:6:22
+   |
+ 6 | fn assert_default<T: Default>() {}
+   |                      ^^^^^^^ required by this bound in `assert_default`
+
+error[E0277]: the trait bound `PromotedConstraint: Default` is not satisfied
+  --> tests/ui/live_authority_default_copy.rs:15:22
+   |
+15 |     assert_default::<PromotedConstraint>();
+   |                      ^^^^^^^^^^^^^^^^^^ the trait `Default` is not implemented for `PromotedConstraint`
+   |
+note: required by a bound in `assert_default`
+  --> tests/ui/live_authority_default_copy.rs:6:22
+   |
+ 6 | fn assert_default<T: Default>() {}
+   |                      ^^^^^^^ required by this bound in `assert_default`
+
+error[E0277]: the trait bound `ConfirmedIntentCapability: Copy` is not satisfied
+  --> tests/ui/live_authority_default_copy.rs:17:19
+   |
+17 |     assert_copy::<ConfirmedIntentCapability>();
+   |                   ^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `Copy` is not implemented for `ConfirmedIntentCapability`
+   |
+note: required by a bound in `assert_copy`
+  --> tests/ui/live_authority_default_copy.rs:7:19
+   |
+ 7 | fn assert_copy<T: Copy>() {}
+   |                   ^^^^ required by this bound in `assert_copy`
+
+error[E0277]: the trait bound `AllowedAttemptCapability: Copy` is not satisfied
+  --> tests/ui/live_authority_default_copy.rs:18:19
+   |
+18 |     assert_copy::<AllowedAttemptCapability>();
+   |                   ^^^^^^^^^^^^^^^^^^^^^^^^ the trait `Copy` is not implemented for `AllowedAttemptCapability`
+   |
+note: required by a bound in `assert_copy`
+  --> tests/ui/live_authority_default_copy.rs:7:19
+   |
+ 7 | fn assert_copy<T: Copy>() {}
+   |                   ^^^^ required by this bound in `assert_copy`
+
+error[E0277]: the trait bound `AuthorizedWorkOrderCapability: Copy` is not satisfied
+  --> tests/ui/live_authority_default_copy.rs:19:19
+   |
+19 |     assert_copy::<AuthorizedWorkOrderCapability>();
+   |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `Copy` is not implemented for `AuthorizedWorkOrderCapability`
+   |
+note: required by a bound in `assert_copy`
+  --> tests/ui/live_authority_default_copy.rs:7:19
+   |
+ 7 | fn assert_copy<T: Copy>() {}
+   |                   ^^^^ required by this bound in `assert_copy`
+
+error[E0277]: the trait bound `JournalBackedFailureHandle: Copy` is not satisfied
+  --> tests/ui/live_authority_default_copy.rs:20:19
+   |
+20 |     assert_copy::<JournalBackedFailureHandle>();
+   |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `Copy` is not implemented for `JournalBackedFailureHandle`
+   |
+note: required by a bound in `assert_copy`
+  --> tests/ui/live_authority_default_copy.rs:7:19
+   |
+ 7 | fn assert_copy<T: Copy>() {}
+   |                   ^^^^ required by this bound in `assert_copy`
+
+error[E0277]: the trait bound `PromotionCapability: Copy` is not satisfied
+  --> tests/ui/live_authority_default_copy.rs:21:19
+   |
+21 |     assert_copy::<PromotionCapability>();
+   |                   ^^^^^^^^^^^^^^^^^^^ the trait `Copy` is not implemented for `PromotionCapability`
+   |
+note: required by a bound in `assert_copy`
+  --> tests/ui/live_authority_default_copy.rs:7:19
+   |
+ 7 | fn assert_copy<T: Copy>() {}
+   |                   ^^^^ required by this bound in `assert_copy`
+
+error[E0277]: the trait bound `PromotedConstraint: Copy` is not satisfied
+  --> tests/ui/live_authority_default_copy.rs:22:19
+   |
+22 |     assert_copy::<PromotedConstraint>();
+   |                   ^^^^^^^^^^^^^^^^^^ the trait `Copy` is not implemented for `PromotedConstraint`
+   |
+note: required by a bound in `assert_copy`
+  --> tests/ui/live_authority_default_copy.rs:7:19
+   |
+ 7 | fn assert_copy<T: Copy>() {}
+   |                   ^^^^ required by this bound in `assert_copy`

@@ -1,0 +1,5 @@
+error[E0616]: field `steps` of struct `MethodProposal` is private
+  --> tests/ui/forge_method_proposal.rs:14:14
+   |
+14 |     proposal.steps = vec![];
+   |              ^^^^^ private field

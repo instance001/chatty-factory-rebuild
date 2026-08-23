@@ -1,0 +1,58 @@
+error[E0432]: unresolved imports `chatty_factory_rebuild::mark_triangulation_dormant`, `chatty_factory_rebuild::resume_triangulation`, `chatty_factory_rebuild::success_does_not_resolve_prior_evidence`
+ --> tests/ui/receipt_only_triangulation_transitions_unavailable.rs:2:5
+  |
+2 |     mark_triangulation_dormant, resume_triangulation, success_does_not_resolve_prior_evidence,
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no `success_does_not_resolve_prior_evidence` in the root
+  |     |                           |
+  |     |                           no `resume_triangulation` in the root
+  |     no `mark_triangulation_dormant` in the root
+  |
+note: found an item that was configured out
+ --> src/lib.rs
+  |
+  | #[cfg(test)]
+  |       ---- the item is gated here
+  | fn mark_triangulation_dormant(
+  |    ^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: found an item that was configured out
+ --> src/lib.rs
+  |
+  | #[cfg(test)]
+  |       ---- the item is gated here
+  | fn resume_triangulation(
+  |    ^^^^^^^^^^^^^^^^^^^^
+note: found an item that was configured out
+ --> src/lib.rs
+  |
+  | #[cfg(test)]
+  |       ---- the item is gated here
+  | fn success_does_not_resolve_prior_evidence(
+  |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unreachable expression
+ --> tests/ui/receipt_only_triangulation_transitions_unavailable.rs:6:49
+  |
+6 |     let _ = mark_triangulation_dormant(todo!(), "caller-controlled dormant state");
+  |                                        -------  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unreachable expression
+  |                                        |
+  |                                        any code following this expression is unreachable
+  |
+  = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: unreachable expression
+ --> tests/ui/receipt_only_triangulation_transitions_unavailable.rs:7:43
+  |
+7 |     let _ = resume_triangulation(todo!(), todo!(), todo!());
+  |                                  -------  ^^^^^^^ unreachable expression
+  |                                  |
+  |                                  any code following this expression is unreachable
+  |
+  = note: this warning originates in the macro `todo` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unreachable expression
+ --> tests/ui/receipt_only_triangulation_transitions_unavailable.rs:8:62
+  |
+8 |     let _ = success_does_not_resolve_prior_evidence(todo!(), "caller-controlled success state");
+  |                                                     -------  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unreachable expression
+  |                                                     |
+  |                                                     any code following this expression is unreachable

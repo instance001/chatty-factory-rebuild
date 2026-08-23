@@ -1,0 +1,21 @@
+error[E0451]: fields `receipt_id`, `trace_id`, `request_id`, `attempt_id`, `work_order_receipt_id`, `work_order_receipt_hash`, `executed_steps` and `written_files` of struct `chatty_factory_rebuild::ExecutionReceipt` are private
+  --> tests/ui/forge_execution_receipt_literal.rs:6:9
+   |
+ 5 |     let _ = ExecutionReceipt {
+   |             ---------------- in this type
+ 6 |         receipt_id: "execution-attempt-1".to_string(),
+   |         ^^^^^^^^^^ private field
+ 7 |         trace_id: "trace".to_string(),
+   |         ^^^^^^^^ private field
+ 8 |         request_id: "request".to_string(),
+   |         ^^^^^^^^^^ private field
+ 9 |         attempt_id: "attempt-1".to_string(),
+   |         ^^^^^^^^^^ private field
+10 |         work_order_receipt_id: "work-order-attempt-1".to_string(),
+   |         ^^^^^^^^^^^^^^^^^^^^^ private field
+11 |         work_order_receipt_hash: "work-order-hash".to_string(),
+   |         ^^^^^^^^^^^^^^^^^^^^^^^ private field
+12 |         executed_steps: 1,
+   |         ^^^^^^^^^^^^^^ private field
+13 |         written_files: vec![PathBuf::from("README.md")],
+   |         ^^^^^^^^^^^^^ private field
