@@ -1,0 +1,79 @@
+warning: unreachable expression
+ --> tests/ui/caller_supplied_host_bounds.rs:7:52
+  |
+7 |     let _ = journal.issue_allowed_attempt(todo!(), todo!(), &bounds, &[]);
+  |                                           -------  ^^^^^^^ unreachable expression
+  |                                           |
+  |                                           any code following this expression is unreachable
+  |
+  = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
+  = note: this warning originates in the macro `todo` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0061]: this method takes 3 arguments but 4 arguments were supplied
+ --> tests/ui/caller_supplied_host_bounds.rs:7:21
+  |
+7 |     let _ = journal.issue_allowed_attempt(todo!(), todo!(), &bounds, &[]);
+  |                     ^^^^^^^^^^^^^^^^^^^^^                   ------- unexpected argument #3 of type `&HostBounds`
+  |
+note: method defined here
+ --> src/lib.rs
+  |
+  |     pub fn issue_allowed_attempt(
+  |            ^^^^^^^^^^^^^^^^^^^^^
+help: remove the extra argument
+  |
+7 -     let _ = journal.issue_allowed_attempt(todo!(), todo!(), &bounds, &[]);
+7 +     let _ = journal.issue_allowed_attempt(todo!(), todo!(), &[]);
+  |
+
+warning: unreachable expression
+ --> tests/ui/caller_supplied_host_bounds.rs:8:49
+  |
+8 |     let _ = journal.execute_work_order(todo!(), &bounds);
+  |                                        -------  ^^^^^^^ unreachable expression
+  |                                        |
+  |                                        any code following this expression is unreachable
+
+error[E0061]: this method takes 1 argument but 2 arguments were supplied
+ --> tests/ui/caller_supplied_host_bounds.rs:8:21
+  |
+8 |     let _ = journal.execute_work_order(todo!(), &bounds);
+  |                     ^^^^^^^^^^^^^^^^^^          ------- unexpected argument #2 of type `&HostBounds`
+  |
+note: method defined here
+ --> src/lib.rs
+  |
+  |     pub fn execute_work_order(
+  |            ^^^^^^^^^^^^^^^^^^
+help: remove the extra argument
+  |
+8 -     let _ = journal.execute_work_order(todo!(), &bounds);
+8 +     let _ = journal.execute_work_order(todo!());
+  |
+
+warning: unreachable expression
+ --> tests/ui/caller_supplied_host_bounds.rs:9:52
+  |
+9 |     let _ = journal.run_ef_rescue_attempt(todo!(), todo!(), &bounds, &[]);
+  |                                           -------  ^^^^^^^ unreachable expression
+  |                                           |
+  |                                           any code following this expression is unreachable
+  |
+  = note: this warning originates in the macro `todo` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0061]: this method takes 3 arguments but 4 arguments were supplied
+ --> tests/ui/caller_supplied_host_bounds.rs:9:21
+  |
+9 |     let _ = journal.run_ef_rescue_attempt(todo!(), todo!(), &bounds, &[]);
+  |                     ^^^^^^^^^^^^^^^^^^^^^                   ------- unexpected argument #3 of type `&HostBounds`
+  |
+note: method defined here
+ --> src/lib.rs
+  |
+  |     pub fn run_ef_rescue_attempt(
+  |            ^^^^^^^^^^^^^^^^^^^^^
+help: remove the extra argument
+  |
+9 -     let _ = journal.run_ef_rescue_attempt(todo!(), todo!(), &bounds, &[]);
+9 +     let _ = journal.run_ef_rescue_attempt(todo!(), todo!(), &[]);
+  |

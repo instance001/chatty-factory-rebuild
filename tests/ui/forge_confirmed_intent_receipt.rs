@@ -12,10 +12,11 @@ fn main() {
         vec![SourceSpan::new(0, 5, "hello")],
     );
     let draft = IntentDraft::new("draft", request, vec![claim]);
-    let journal = RuntimeJournal::new(".", "trace", "request");
+    let journal = RuntimeJournal::new(".", "trace", "request", chatty_factory_rebuild::HostBounds::new(".", 4, 4096));
     let confirmed = journal
         .confirm_intent(draft, external_operator_assertion("operator"))
         .unwrap();
     let mut receipt = confirmed.receipt().clone();
     receipt.receipt_id = "caller-picked".to_string();
 }
+

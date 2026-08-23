@@ -1,7 +1,7 @@
 warning: unreachable expression
-  --> tests/ui/forge_gate_receipt.rs:16:59
+  --> tests/ui/forge_gate_receipt.rs:15:59
    |
-16 |     let mut gate = journal.issue_allowed_attempt(todo!(), &proposal, &bounds, &[]).unwrap_err();
+15 |     let mut gate = journal.issue_allowed_attempt(todo!(), &proposal, &[]).unwrap_err();
    |                                                  -------  ^^^^^^^^^ unreachable expression
    |                                                  |
    |                                                  any code following this expression is unreachable
@@ -9,7 +9,7 @@ warning: unreachable expression
    = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
 
 error[E0616]: field `admissible` of struct `chatty_factory_rebuild::GateReceipt` is private
-  --> tests/ui/forge_gate_receipt.rs:17:10
+  --> tests/ui/forge_gate_receipt.rs:16:10
    |
-17 |     gate.admissible = true;
+16 |     gate.admissible = true;
    |          ^^^^^^^^^^ private field

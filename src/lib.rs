@@ -1308,18 +1308,25 @@ pub struct RuntimeJournal {
     root: PathBuf,
     trace_id: String,
     request_id: String,
+    host_bounds: HostBounds,
 }
 
 impl RuntimeJournal {
+    /// Trusted host configuration boundary: the embedding host establishes
+    /// runtime storage identity and the bounds that govern gate, execution, and
+    /// verification policy. Model-side callers supply method proposals; they do
+    /// not get to bring per-attempt policy.
     pub fn new(
         root: impl Into<PathBuf>,
         trace_id: impl Into<String>,
         request_id: impl Into<String>,
+        host_bounds: HostBounds,
     ) -> Self {
         Self {
             root: root.into(),
             trace_id: trace_id.into(),
             request_id: request_id.into(),
+            host_bounds,
         }
     }
 
@@ -1550,7 +1557,6 @@ impl RuntimeJournal {
         &self,
         intent: &ConfirmedIntentCapability,
         proposal: &MethodProposal,
-        bounds: &HostBounds,
         promoted_constraints: &[PromotedConstraint],
     ) -> Result<AllowedAttemptCapability, GateReceipt> {
         let attempt_id = self.next_attempt_id().map_err(|err| GateReceipt {
@@ -1573,7 +1579,7 @@ impl RuntimeJournal {
             attempt_id,
             intent,
             proposal,
-            bounds,
+            &self.host_bounds,
             promoted_constraints,
         )?;
         self.ensure_attempt_id_unused(&allowed.gate_receipt.attempt_id)
@@ -1672,7 +1678,6 @@ impl RuntimeJournal {
     pub fn execute_work_order(
         &self,
         work_order: AuthorizedWorkOrderCapability,
-        bounds: &HostBounds,
     ) -> Result<ExecutionReceipt, String> {
         self.reject_if_spent(work_order.capability_id())?;
         self.verify_capability_record(
@@ -1698,7 +1703,7 @@ impl RuntimeJournal {
             vec![work_order.work_order_record_id.clone()],
             &spend,
         )?;
-        execute_work_order_internal(work_order, bounds)
+        execute_work_order_internal(work_order, &self.host_bounds)
     }
 
     pub fn reissue_promotion_capability(
@@ -1786,7 +1791,6 @@ impl RuntimeJournal {
         &self,
         intent: &ConfirmedIntentCapability,
         externally_supplied_proposal: &MethodProposal,
-        bounds: &HostBounds,
         promoted_constraints: &[PromotedConstraint],
     ) -> Result<EfRescueAttemptOutcome, String> {
         let attempt_id = self.next_attempt_id()?;
@@ -1794,7 +1798,7 @@ impl RuntimeJournal {
             &attempt_id,
             intent,
             externally_supplied_proposal,
-            bounds,
+            &self.host_bounds,
             promoted_constraints,
         )?;
         let Some(allowed) = allowed else {
@@ -1815,7 +1819,7 @@ impl RuntimeJournal {
         let work_order_record_id = work_order.work_order_record_id.clone();
         let work_order_receipt_id = work_order.receipt.receipt_id.clone();
         let work_order_receipt_hash = work_order.receipt_hash.clone();
-        let execution = match self.execute_work_order(work_order, bounds) {
+        let execution = match self.execute_work_order(work_order) {
             Ok(execution) => execution,
             Err(err) => {
                 return self.record_attempt_failure_from_parent(
@@ -1833,7 +1837,7 @@ impl RuntimeJournal {
             }
         };
         let execution_record = self.append_execution_receipt(work_order_record_id, &execution)?;
-        let verification = verify_against_intent(&execution, intent, bounds);
+        let verification = verify_against_intent(&execution, intent, &self.host_bounds);
         let verification_record =
             self.append_verification_receipt(execution_record.record_id.clone(), &verification)?;
         if verification.success {
@@ -3770,10 +3774,9 @@ mod tests {
         let a = proposal("proposal-a", "README.md", "hello");
         let b = proposal("proposal-b", "README.md", "hello");
         let runtime = tempfile::tempdir().unwrap();
-        let journal = RuntimeJournal::new(runtime.path(), "trace-1", "request-1");
-        let allowed = journal
-            .issue_allowed_attempt(&intent, &a, &bounds(temp.path()), &[])
-            .unwrap();
+        let journal =
+            RuntimeJournal::new(runtime.path(), "trace-1", "request-1", bounds(temp.path()));
+        let allowed = journal.issue_allowed_attempt(&intent, &a, &[]).unwrap();
         assert!(journal.authorize_work_order(allowed, &intent, &b).is_err());
     }
 
@@ -3782,11 +3785,12 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let intent = intent();
         let runtime = tempfile::tempdir().unwrap();
-        let journal = RuntimeJournal::new(runtime.path(), "trace-1", "request-1");
+        let journal =
+            RuntimeJournal::new(runtime.path(), "trace-1", "request-1", bounds(temp.path()));
         let original = proposal("proposal-a", "README.md", "hello");
         let changed = proposal("proposal-a", "README.md", "changed");
         let allowed = journal
-            .issue_allowed_attempt(&intent, &original, &bounds(temp.path()), &[])
+            .issue_allowed_attempt(&intent, &original, &[])
             .unwrap();
         assert!(journal
             .authorize_work_order(allowed, &intent, &changed)
@@ -3798,11 +3802,85 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let intent = intent();
         let runtime = tempfile::tempdir().unwrap();
-        let journal = RuntimeJournal::new(runtime.path(), "trace-1", "request-1");
+        let journal =
+            RuntimeJournal::new(runtime.path(), "trace-1", "request-1", bounds(temp.path()));
         let bad = MethodProposal::new("bad", "empty", vec![], vec![]);
-        assert!(journal
-            .issue_allowed_attempt(&intent, &bad, &bounds(temp.path()), &[])
-            .is_err());
+        assert!(journal.issue_allowed_attempt(&intent, &bad, &[]).is_err());
+    }
+
+    #[test]
+    fn restrictive_journal_owned_bounds_reject_over_bound_proposal() {
+        let workspace = tempfile::tempdir().unwrap();
+        let runtime = tempfile::tempdir().unwrap();
+        let intent = intent();
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            HostBounds::new(workspace.path(), 0, 4096),
+        );
+        let method = proposal("proposal-a", "README.md", "hello");
+
+        let gate = journal
+            .issue_allowed_attempt(&intent, &method, &[])
+            .unwrap_err();
+
+        assert!(!gate.admissible());
+        assert!(gate
+            .reasons()
+            .contains(&"method proposal exceeds step bound".to_string()));
+    }
+
+    #[test]
+    fn execution_uses_journal_owned_workspace_root() {
+        let workspace = tempfile::tempdir().unwrap();
+        let runtime = tempfile::tempdir().unwrap();
+        let intent = intent();
+        let method = proposal("proposal-a", "README.md", "hello");
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(workspace.path()),
+        );
+        let allowed = journal
+            .issue_allowed_attempt(&intent, &method, &[])
+            .unwrap();
+        let work_order = journal
+            .authorize_work_order(allowed, &intent, &method)
+            .unwrap();
+
+        journal.execute_work_order(work_order).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(workspace.path().join("README.md")).unwrap(),
+            "hello"
+        );
+        assert!(!runtime.path().join("README.md").exists());
+    }
+
+    #[test]
+    fn rescue_path_uses_same_journal_owned_bounds_for_gate_execution_and_verification() {
+        let workspace = tempfile::tempdir().unwrap();
+        let runtime = tempfile::tempdir().unwrap();
+        let intent = intent();
+        let method = proposal("proposal-a", "README.md", "hello");
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(workspace.path()),
+        );
+
+        let outcome = journal
+            .run_ef_rescue_attempt(&intent, &method, &[])
+            .unwrap();
+
+        assert!(matches!(outcome, EfRescueAttemptOutcome::Artifact { .. }));
+        assert_eq!(
+            fs::read_to_string(workspace.path().join("README.md")).unwrap(),
+            "hello"
+        );
     }
 
     #[test]
@@ -3810,14 +3888,15 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let intent = intent();
         let runtime = tempfile::tempdir().unwrap();
-        let journal = RuntimeJournal::new(runtime.path(), "trace-1", "request-1");
+        let journal =
+            RuntimeJournal::new(runtime.path(), "trace-1", "request-1", bounds(temp.path()));
         let method = proposal("proposal-a", "README.md", "hello");
 
         let allowed = journal
-            .issue_allowed_attempt(&intent, &method, &bounds(temp.path()), &[])
+            .issue_allowed_attempt(&intent, &method, &[])
             .unwrap();
         let second = journal
-            .issue_allowed_attempt(&intent, &method, &bounds(temp.path()), &[])
+            .issue_allowed_attempt(&intent, &method, &[])
             .unwrap();
 
         assert_eq!(
@@ -3842,9 +3921,10 @@ mod tests {
         let runtime = tempfile::tempdir().unwrap();
         let intent = intent();
         let method = proposal("proposal-a", "README.md", "hello");
-        let journal = RuntimeJournal::new(runtime.path(), "trace-1", "request-1");
+        let journal =
+            RuntimeJournal::new(runtime.path(), "trace-1", "request-1", bounds(temp.path()));
         let allowed = journal
-            .issue_allowed_attempt(&intent, &method, &bounds(temp.path()), &[])
+            .issue_allowed_attempt(&intent, &method, &[])
             .unwrap();
         let gate_record_id = allowed.gate_record_id.clone();
 
@@ -3861,7 +3941,12 @@ mod tests {
     fn invalid_parent_kind_topology_is_rejected() {
         let runtime = tempfile::tempdir().unwrap();
         let intent = intent();
-        let journal = RuntimeJournal::new(runtime.path(), "trace-1", "request-1");
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
         let request = journal
             .append_request(&intent.receipt().exact_request)
             .unwrap();
@@ -3877,7 +3962,8 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let intent = intent();
         let method = proposal("proposal-a", "README.md", "hello");
-        let journal = RuntimeJournal::new(runtime.path(), "trace-1", "request-1");
+        let journal =
+            RuntimeJournal::new(runtime.path(), "trace-1", "request-1", bounds(temp.path()));
         let request = journal
             .append_request(&intent.receipt().exact_request)
             .unwrap();
@@ -3904,7 +3990,12 @@ mod tests {
     #[test]
     fn fabricated_vault_entries_cannot_enter_triangulation() {
         let runtime = tempfile::tempdir().unwrap();
-        let journal = RuntimeJournal::new(runtime.path(), "trace-1", "request-1");
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
         let fabricated = VaultEntryReceipt {
             receipt_id: "vault-fake".to_string(),
             trace_id: "trace-1".to_string(),
@@ -3924,7 +4015,12 @@ mod tests {
     fn tail_deletion_is_detected_by_local_head_anchor() {
         let runtime = tempfile::tempdir().unwrap();
         let intent = intent();
-        let journal = RuntimeJournal::new(runtime.path(), "trace-1", "request-1");
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
         let request = journal
             .append_request(&intent.receipt().exact_request)
             .unwrap();
@@ -3942,7 +4038,12 @@ mod tests {
     fn single_failure_creates_no_promotion_candidate() {
         let runtime = tempfile::tempdir().unwrap();
         let intent = intent();
-        let journal = RuntimeJournal::new(runtime.path(), "trace-1", "request-1");
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
         let (_vault_id, handle) = append_attempt_failure(
             &journal,
             "attempt-1",
@@ -3958,7 +4059,12 @@ mod tests {
     fn two_journal_backed_failures_keep_triangulation_unresolved() {
         let runtime = tempfile::tempdir().unwrap();
         let intent = intent();
-        let journal = RuntimeJournal::new(runtime.path(), "trace-1", "request-1");
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
         let (_vault_a, handle_a) = append_attempt_failure(
             &journal,
             "attempt-1",
@@ -3981,7 +4087,12 @@ mod tests {
     fn dormant_triangulation_can_resume_with_new_failure_without_promoting() {
         let runtime = tempfile::tempdir().unwrap();
         let intent = intent();
-        let journal = RuntimeJournal::new(runtime.path(), "trace-1", "request-1");
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
         let (_vault_a, handle_a) = append_attempt_failure(
             &journal,
             "attempt-1",
@@ -4017,7 +4128,12 @@ mod tests {
         let runtime = tempfile::tempdir().unwrap();
         let temp = tempfile::tempdir().unwrap();
         let intent = intent();
-        let journal = RuntimeJournal::new(runtime.path(), "trace-1", "request-1");
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
         let (_vault_a, handle_a) = append_attempt_failure(
             &journal,
             "attempt-1",
@@ -4046,7 +4162,12 @@ mod tests {
     fn explicit_isolated_bounded_fault_condition_can_create_candidate() {
         let runtime = tempfile::tempdir().unwrap();
         let intent = intent();
-        let journal = RuntimeJournal::new(runtime.path(), "trace-1", "request-1");
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
         let (vault_a, handle_a) = append_attempt_failure(
             &journal,
             "attempt-1",
@@ -4098,13 +4219,17 @@ mod tests {
 
     #[test]
     fn authorization_capability_replay_fails_after_reload() {
-        let temp = tempfile::tempdir().unwrap();
         let runtime = tempfile::tempdir().unwrap();
         let intent = intent();
         let method = proposal("proposal-a", "README.md", "hello");
-        let journal = RuntimeJournal::new(runtime.path(), "trace-1", "request-1");
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
         let allowed = journal
-            .issue_allowed_attempt(&intent, &method, &bounds(temp.path()), &[])
+            .issue_allowed_attempt(&intent, &method, &[])
             .unwrap();
         let gate_record_id = allowed.gate_record_id.clone();
         let reissued = journal
@@ -4114,7 +4239,12 @@ mod tests {
             .authorize_work_order(reissued, &intent, &method)
             .unwrap();
 
-        let reloaded = RuntimeJournal::new(runtime.path(), "trace-1", "request-1");
+        let reloaded = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
         assert!(reloaded
             .reissue_allowed_attempt(&gate_record_id, &intent, &method)
             .is_err());
@@ -4126,17 +4256,20 @@ mod tests {
         let runtime = tempfile::tempdir().unwrap();
         let intent = intent();
         let method = proposal("proposal-a", "README.md", "hello");
-        let journal = RuntimeJournal::new(runtime.path(), "trace-1", "request-1");
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(workspace.path()),
+        );
         let allowed = journal
-            .issue_allowed_attempt(&intent, &method, &bounds(workspace.path()), &[])
+            .issue_allowed_attempt(&intent, &method, &[])
             .unwrap();
         let work_order = journal
             .authorize_work_order(allowed, &intent, &method)
             .unwrap();
 
-        assert!(journal
-            .execute_work_order(work_order, &bounds(workspace.path()))
-            .is_ok());
+        assert!(journal.execute_work_order(work_order).is_ok());
         let replay = AuthorizedWorkOrderCapability {
             capability_id: "cap-work-order-work-order-attempt-1".to_string(),
             work_order_record_id: "work-order-4".to_string(),
@@ -4157,16 +4290,19 @@ mod tests {
             },
             receipt_hash: "not-needed-for-spend-check".to_string(),
         };
-        assert!(journal
-            .execute_work_order(replay, &bounds(workspace.path()))
-            .is_err());
+        assert!(journal.execute_work_order(replay).is_err());
     }
 
     #[test]
     fn promotion_capability_replay_fails_after_reload() {
         let runtime = tempfile::tempdir().unwrap();
         let intent = intent();
-        let journal = RuntimeJournal::new(runtime.path(), "trace-1", "request-1");
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
         let (approval_record_id, _candidate_record_id, _candidate_hash) =
             append_isolated_candidate_approval(&journal, &intent);
         let promotion = journal
@@ -4174,7 +4310,12 @@ mod tests {
             .unwrap();
         assert!(journal.promote_constraint(promotion).is_ok());
 
-        let reloaded = RuntimeJournal::new(runtime.path(), "trace-1", "request-1");
+        let reloaded = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
         assert!(reloaded
             .reissue_promotion_capability(&approval_record_id)
             .is_err());
@@ -4187,7 +4328,12 @@ mod tests {
         let intent = intent();
         let method_a = proposal("proposal-a", "README.md", "hello");
         let method_b = proposal("proposal-b", "README.md", "hello");
-        let journal = RuntimeJournal::new(runtime.path(), "trace-1", "request-1");
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
         let request = journal
             .append_request(&intent.receipt().exact_request)
             .unwrap();
@@ -4213,13 +4359,17 @@ mod tests {
 
     #[test]
     fn work_order_and_execution_hash_bindings_must_match_exactly() {
-        let temp = tempfile::tempdir().unwrap();
         let runtime = tempfile::tempdir().unwrap();
         let intent = intent();
         let method = proposal("proposal-a", "README.md", "hello");
-        let journal = RuntimeJournal::new(runtime.path(), "trace-1", "request-1");
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
         let allowed = journal
-            .issue_allowed_attempt(&intent, &method, &bounds(temp.path()), &[])
+            .issue_allowed_attempt(&intent, &method, &[])
             .unwrap();
         let gate_record_id = allowed.gate_record_id.clone();
         let forged = AuthorizedWorkOrderCapability {
@@ -4248,9 +4398,14 @@ mod tests {
             .contains("work order semantic binding mismatch"));
 
         let runtime = tempfile::tempdir().unwrap();
-        let journal = RuntimeJournal::new(runtime.path(), "trace-1", "request-1");
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
         let allowed = journal
-            .issue_allowed_attempt(&intent, &method, &bounds(temp.path()), &[])
+            .issue_allowed_attempt(&intent, &method, &[])
             .unwrap();
         let work_order = journal
             .authorize_work_order(allowed, &intent, &method)
@@ -4275,7 +4430,12 @@ mod tests {
     fn candidate_approval_hash_mismatch_prevents_promotion_capability_reissue() {
         let runtime = tempfile::tempdir().unwrap();
         let intent = intent();
-        let journal = RuntimeJournal::new(runtime.path(), "trace-1", "request-1");
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
         let (_approval_record_id, candidate_record_id, _candidate_hash) =
             append_isolated_candidate_approval(&journal, &intent);
         let records = journal.verify().unwrap();
@@ -4298,7 +4458,12 @@ mod tests {
     fn promotion_capability_reissue_requires_verified_local_head() {
         let runtime = tempfile::tempdir().unwrap();
         let intent = intent();
-        let journal = RuntimeJournal::new(runtime.path(), "trace-1", "request-1");
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
         let (approval_record_id, _candidate_record_id, _candidate_hash) =
             append_isolated_candidate_approval(&journal, &intent);
         fs::write(runtime.path().join("journal_head.json"), "{}").unwrap();
@@ -4312,7 +4477,12 @@ mod tests {
     fn non_isolated_triangulation_states_cannot_create_candidates() {
         let runtime = tempfile::tempdir().unwrap();
         let intent = intent();
-        let journal = RuntimeJournal::new(runtime.path(), "trace-1", "request-1");
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
         let (_vault_a, handle_a) = append_attempt_failure(
             &journal,
             "attempt-1",
@@ -4349,7 +4519,12 @@ mod tests {
         let runtime = tempfile::tempdir().unwrap();
         let intent = intent();
         let method = proposal("proposal-a", "README.md", "hello");
-        let journal = RuntimeJournal::new(runtime.path(), "trace-1", "request-1");
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
         let unbacked = issue_allowed_attempt_internal(
             "trace-1",
             "attempt-1",
@@ -4382,22 +4557,36 @@ mod tests {
     #[test]
     fn journal_confirm_intent_replay_fails_after_reload() {
         let runtime = tempfile::tempdir().unwrap();
-        let journal = RuntimeJournal::new(runtime.path(), "trace-1", "request-1");
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
         let request_draft = draft("Create README with hello", "file_contains:README.md::hello");
         let assertion = external_operator_assertion("operator-confirmation");
         journal
             .confirm_intent(request_draft.clone(), assertion.clone())
             .unwrap();
 
-        let reloaded = RuntimeJournal::new(runtime.path(), "trace-1", "request-1");
+        let reloaded = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
         assert!(reloaded.confirm_intent(request_draft, assertion).is_err());
     }
 
     #[test]
     fn verified_journal_reissues_confirmed_intent_after_reload() {
         let runtime = tempfile::tempdir().unwrap();
-        let workspace = tempfile::tempdir().unwrap();
-        let journal = RuntimeJournal::new(runtime.path(), "trace-1", "request-1");
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
         journal
             .confirm_intent(
                 draft("Create README with hello", "file_contains:README.md::hello"),
@@ -4412,20 +4601,30 @@ mod tests {
             .unwrap()
             .record_id;
 
-        let reloaded = RuntimeJournal::new(runtime.path(), "trace-1", "request-1");
+        let reloaded = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
         let reissued = reloaded
             .reissue_confirmed_intent(&confirmed_record_id)
             .unwrap();
         let method = proposal("proposal-a", "README.md", "hello");
         reloaded
-            .issue_allowed_attempt(&reissued, &method, &bounds(workspace.path()), &[])
+            .issue_allowed_attempt(&reissued, &method, &[])
             .unwrap();
     }
 
     #[test]
     fn confirmed_intent_reissue_requires_confirmed_intent_record() {
         let runtime = tempfile::tempdir().unwrap();
-        let journal = RuntimeJournal::new(runtime.path(), "trace-1", "request-1");
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
         journal
             .confirm_intent(
                 draft("Create README with hello", "file_contains:README.md::hello"),
@@ -4449,8 +4648,12 @@ mod tests {
     #[test]
     fn attempts_reuse_journal_backed_confirmed_intent_record() {
         let runtime = tempfile::tempdir().unwrap();
-        let workspace = tempfile::tempdir().unwrap();
-        let journal = RuntimeJournal::new(runtime.path(), "trace-1", "request-1");
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
         let intent = journal
             .confirm_intent(
                 draft("Create README with hello", "file_contains:README.md::hello"),
@@ -4459,18 +4662,12 @@ mod tests {
             .unwrap();
 
         journal
-            .issue_allowed_attempt(
-                &intent,
-                &proposal("proposal-a", "README.md", "hello"),
-                &bounds(workspace.path()),
-                &[],
-            )
+            .issue_allowed_attempt(&intent, &proposal("proposal-a", "README.md", "hello"), &[])
             .unwrap();
         journal
             .issue_allowed_attempt(
                 &intent,
                 &proposal("proposal-b", "README.md", "hello again"),
-                &bounds(workspace.path()),
                 &[],
             )
             .unwrap();
@@ -4496,7 +4693,12 @@ mod tests {
     fn persisted_forged_external_operator_assertion_fails_journal_verification() {
         let runtime = tempfile::tempdir().unwrap();
         let intent = intent();
-        let journal = RuntimeJournal::new(runtime.path(), "trace-1", "request-1");
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
         let request = journal
             .append_request(&intent.receipt().exact_request)
             .unwrap();
@@ -4543,7 +4745,12 @@ mod tests {
     fn forged_promotion_approval_assertion_cannot_issue_receipt() {
         let runtime = tempfile::tempdir().unwrap();
         let intent = intent();
-        let journal = RuntimeJournal::new(runtime.path(), "trace-1", "request-1");
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
         let (_approval_record_id, candidate_record_id, _candidate_hash) =
             append_isolated_candidate_approval(&journal, &intent);
         let records = journal.verify().unwrap();
@@ -4566,7 +4773,12 @@ mod tests {
     fn persisted_forged_promotion_approval_assertion_fails_journal_verification() {
         let runtime = tempfile::tempdir().unwrap();
         let intent = intent();
-        let journal = RuntimeJournal::new(runtime.path(), "trace-1", "request-1");
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
         append_isolated_candidate_approval(&journal, &intent);
 
         let journal_path = runtime.path().join("runtime_records.jsonl");
@@ -4609,7 +4821,12 @@ mod tests {
     fn persisted_forged_confirmed_intent_receipt_id_fails_journal_verification() {
         let runtime = tempfile::tempdir().unwrap();
         let intent = intent();
-        let journal = RuntimeJournal::new(runtime.path(), "trace-1", "request-1");
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
         let request = journal
             .append_request(&intent.receipt().exact_request)
             .unwrap();
@@ -4654,7 +4871,12 @@ mod tests {
     #[test]
     fn altered_envelope_record_id_fails_deterministic_id_verification() {
         let runtime = tempfile::tempdir().unwrap();
-        let journal = RuntimeJournal::new(runtime.path(), "trace-1", "request-1");
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
         journal
             .confirm_intent(
                 draft("Create README with hello", "file_contains:README.md::hello"),
@@ -4704,7 +4926,12 @@ mod tests {
             external_operator_assertion("operator-confirmation"),
         )
         .unwrap();
-        let journal = RuntimeJournal::new(runtime.path(), "trace-1", "request-1");
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
         let request = journal
             .append_request(&intent.receipt().exact_request)
             .unwrap();
@@ -4718,13 +4945,17 @@ mod tests {
 
     #[test]
     fn capability_spend_must_bind_to_consumed_parent_hashes() {
-        let temp = tempfile::tempdir().unwrap();
         let runtime = tempfile::tempdir().unwrap();
         let intent = intent();
         let method = proposal("proposal-a", "README.md", "hello");
-        let journal = RuntimeJournal::new(runtime.path(), "trace-1", "request-1");
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
         let allowed = journal
-            .issue_allowed_attempt(&intent, &method, &bounds(temp.path()), &[])
+            .issue_allowed_attempt(&intent, &method, &[])
             .unwrap();
         let bad_spend = CapabilitySpendReceipt {
             receipt_id: "spend-forged".to_string(),
@@ -4755,18 +4986,21 @@ mod tests {
         let runtime = tempfile::tempdir().unwrap();
         let intent = intent();
         let method = proposal("proposal-a", "README.md", "hello");
-        let journal = RuntimeJournal::new(runtime.path(), "trace-1", "request-1");
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(workspace.path()),
+        );
         let allowed = journal
-            .issue_allowed_attempt(&intent, &method, &bounds(workspace.path()), &[])
+            .issue_allowed_attempt(&intent, &method, &[])
             .unwrap();
         let gate_record_id = allowed.gate_record_id.clone();
         let work_order = journal
             .authorize_work_order(allowed, &intent, &method)
             .unwrap();
         let work_order_record_id = work_order.work_order_record_id.clone();
-        let execution = journal
-            .execute_work_order(work_order, &bounds(workspace.path()))
-            .unwrap();
+        let execution = journal.execute_work_order(work_order).unwrap();
         let execution_record = journal
             .append_execution_receipt(work_order_record_id, &execution)
             .unwrap();
@@ -4827,8 +5061,18 @@ mod tests {
         let runtime_a = tempfile::tempdir().unwrap();
         let runtime_b = tempfile::tempdir().unwrap();
         let intent = intent();
-        let journal_a = RuntimeJournal::new(runtime_a.path(), "trace-1", "request-1");
-        let journal_b = RuntimeJournal::new(runtime_b.path(), "trace-1", "request-1");
+        let journal_a = RuntimeJournal::new(
+            runtime_a.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
+        let journal_b = RuntimeJournal::new(
+            runtime_b.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
         let (_vault_a, handle_a) = append_attempt_failure(
             &journal_a,
             "attempt-1",
@@ -4851,7 +5095,12 @@ mod tests {
     fn promotion_candidate_source_vaults_must_match_triangulation() {
         let runtime = tempfile::tempdir().unwrap();
         let intent = intent();
-        let journal = RuntimeJournal::new(runtime.path(), "trace-1", "request-1");
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
         let (approval_record_id, _candidate_record_id, _candidate_hash) =
             append_isolated_candidate_approval(&journal, &intent);
         let records = journal.verify().unwrap();
@@ -4885,10 +5134,15 @@ mod tests {
             }],
             vec!["pretend external model says this is enough".to_string()],
         );
-        let journal = RuntimeJournal::new(runtime.path(), "trace-1", "request-1");
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(workspace.path()),
+        );
 
         let outcome = journal
-            .run_ef_rescue_attempt(&intent, &method, &bounds(workspace.path()), &[])
+            .run_ef_rescue_attempt(&intent, &method, &[])
             .unwrap();
 
         assert!(matches!(outcome, EfRescueAttemptOutcome::Artifact { .. }));
@@ -4946,7 +5200,6 @@ mod tests {
 
     #[test]
     fn ef_rescue_attempt_blocked_gate_records_failure_without_execution() {
-        let workspace = tempfile::tempdir().unwrap();
         let runtime = tempfile::tempdir().unwrap();
         let intent = intent();
         let blocked = MethodProposal::new(
@@ -4955,10 +5208,15 @@ mod tests {
             vec![],
             vec![],
         );
-        let journal = RuntimeJournal::new(runtime.path(), "trace-1", "request-1");
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
 
         let outcome = journal
-            .run_ef_rescue_attempt(&intent, &blocked, &bounds(workspace.path()), &[])
+            .run_ef_rescue_attempt(&intent, &blocked, &[])
             .unwrap();
 
         assert!(matches!(
@@ -4988,10 +5246,15 @@ mod tests {
         let runtime = tempfile::tempdir().unwrap();
         let intent = intent();
         let method = proposal("proposal-fails-verification", "README.md", "wrong");
-        let journal = RuntimeJournal::new(runtime.path(), "trace-1", "request-1");
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(workspace.path()),
+        );
 
         let outcome = journal
-            .run_ef_rescue_attempt(&intent, &method, &bounds(workspace.path()), &[])
+            .run_ef_rescue_attempt(&intent, &method, &[])
             .unwrap();
 
         assert!(matches!(
@@ -5027,7 +5290,12 @@ mod tests {
         let runtime = tempfile::tempdir().unwrap();
         let intent = intent();
         let method = proposal("proposal-blocked-by-law", "README.md", "hello");
-        let journal = RuntimeJournal::new(runtime.path(), "trace-1", "request-1");
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
         let promoted = PromotedConstraint {
             constraint_id: "constraint-1".to_string(),
             trace_id: "trace-1".to_string(),
@@ -5039,7 +5307,7 @@ mod tests {
         };
 
         let outcome = journal
-            .run_ef_rescue_attempt(&intent, &method, &bounds(workspace.path()), &[promoted])
+            .run_ef_rescue_attempt(&intent, &method, &[promoted])
             .unwrap();
 
         assert!(matches!(
@@ -5075,10 +5343,15 @@ mod tests {
             "blocked-parent/README.md",
             "hello",
         );
-        let journal = RuntimeJournal::new(runtime.path(), "trace-1", "request-1");
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(workspace.path()),
+        );
 
         let outcome = journal
-            .run_ef_rescue_attempt(&intent, &method, &bounds(workspace.path()), &[])
+            .run_ef_rescue_attempt(&intent, &method, &[])
             .unwrap();
 
         let EfRescueAttemptOutcome::UnresolvedFailure {
@@ -5117,13 +5390,18 @@ mod tests {
         let intent = intent();
         let method_a = proposal("proposal-a", "README.md", "wrong-a");
         let method_b = proposal("proposal-b", "README.md", "wrong-b");
-        let journal = RuntimeJournal::new(runtime.path(), "trace-1", "request-1");
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(workspace.path()),
+        );
 
         let first = journal
-            .run_ef_rescue_attempt(&intent, &method_a, &bounds(workspace.path()), &[])
+            .run_ef_rescue_attempt(&intent, &method_a, &[])
             .unwrap();
         let second = journal
-            .run_ef_rescue_attempt(&intent, &method_b, &bounds(workspace.path()), &[])
+            .run_ef_rescue_attempt(&intent, &method_b, &[])
             .unwrap();
 
         assert!(matches!(
@@ -5184,15 +5462,20 @@ mod tests {
         let runtime = tempfile::tempdir().unwrap();
         let intent = intent();
         let method = proposal("proposal-a", "README.md", "hello");
-        let journal = RuntimeJournal::new(runtime.path(), "trace-1", "request-1");
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(workspace.path()),
+        );
 
         journal
-            .run_ef_rescue_attempt(&intent, &method, &bounds(workspace.path()), &[])
+            .run_ef_rescue_attempt(&intent, &method, &[])
             .unwrap();
         let records_before = journal.verify().unwrap();
 
         journal
-            .run_ef_rescue_attempt(&intent, &method, &bounds(workspace.path()), &[])
+            .run_ef_rescue_attempt(&intent, &method, &[])
             .unwrap();
 
         let records = journal.verify().unwrap();
@@ -5249,6 +5532,7 @@ mod tests {
         tests.compile_fail("tests/ui/deserialize_all_live_capabilities.rs");
         tests.compile_fail("tests/ui/live_capability_clone.rs");
         tests.compile_fail("tests/ui/repeat_execute_work_order.rs");
+        tests.compile_fail("tests/ui/caller_supplied_host_bounds.rs");
         tests.compile_fail("tests/ui/arbitrary_append_record.rs");
         tests.compile_fail("tests/ui/fabricated_typed_appends.rs");
         tests.compile_fail("tests/ui/forge_authorized_work_order.rs");

@@ -1,6 +1,6 @@
 use chatty_factory_rebuild::{
-    external_operator_assertion, ExactRequest, HostBounds, IntentClaim, IntentClaimKind,
-    IntentDraft, MethodProposal, ProposedStep, RuntimeJournal, SourceSpan,
+    external_operator_assertion, ExactRequest, IntentClaim, IntentClaimKind, IntentDraft,
+    MethodProposal, ProposedStep, RuntimeJournal, SourceSpan,
 };
 use std::path::PathBuf;
 
@@ -12,7 +12,7 @@ fn main() {
         "file_contains:README.md::hello",
         vec![SourceSpan::new(0, 5, "hello")],
     );
-    let journal = RuntimeJournal::new(".", "trace", "request");
+    let journal = RuntimeJournal::new(".", "trace", "request", chatty_factory_rebuild::HostBounds::new(".", 4, 4096));
     let intent = journal
         .confirm_intent(
             IntentDraft::new("draft", request, vec![claim]),
@@ -28,9 +28,8 @@ fn main() {
         }],
         vec![],
     );
-    let bounds = HostBounds::new(".", 4, 4096);
     let allowed = journal
-        .issue_allowed_attempt(&intent, &proposal, &bounds, &[])
+        .issue_allowed_attempt(&intent, &proposal, &[])
         .unwrap();
     let work_order = journal
         .authorize_work_order(allowed, &intent, &proposal)
@@ -38,3 +37,4 @@ fn main() {
     let mut receipt = work_order.receipt().clone();
     receipt.steps = vec![];
 }
+

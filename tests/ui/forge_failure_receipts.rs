@@ -5,7 +5,7 @@ use chatty_factory_rebuild::{
 };
 
 fn main() {
-    let journal = RuntimeJournal::new(".", "trace", "request");
+    let journal = RuntimeJournal::new(".", "trace", "request", chatty_factory_rebuild::HostBounds::new(".", 4, 4096));
     let records = journal.verify().unwrap();
 
     let mut failure: FailureEvidenceReceipt =
@@ -36,3 +36,4 @@ fn main() {
         serde_json::from_value(records[0].payload().clone()).unwrap();
     spend.consumed_for = "caller-replay".to_string();
 }
+

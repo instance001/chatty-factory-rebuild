@@ -1,10 +1,33 @@
-error[E0382]: use of moved value: `work_order`
- --> tests/ui/repeat_execute_work_order.rs:9:40
+error[E0061]: this method takes 1 argument but 2 arguments were supplied
+ --> tests/ui/repeat_execute_work_order.rs:8:21
   |
-5 |     work_order: AuthorizedWorkOrderCapability,
-  |     ---------- move occurs because `work_order` has type `AuthorizedWorkOrderCapability`, which does not implement the `Copy` trait
-...
 8 |     let _ = journal.execute_work_order(work_order, bounds);
-  |                                        ---------- value moved here
+  |                     ^^^^^^^^^^^^^^^^^^             ------ unexpected argument #2 of type `&HostBounds`
+  |
+note: method defined here
+ --> src/lib.rs
+  |
+  |     pub fn execute_work_order(
+  |            ^^^^^^^^^^^^^^^^^^
+help: remove the extra argument
+  |
+8 -     let _ = journal.execute_work_order(work_order, bounds);
+8 +     let _ = journal.execute_work_order(work_order);
+  |
+
+error[E0061]: this method takes 1 argument but 2 arguments were supplied
+ --> tests/ui/repeat_execute_work_order.rs:9:21
+  |
 9 |     let _ = journal.execute_work_order(work_order, bounds);
-  |                                        ^^^^^^^^^^ value used here after move
+  |                     ^^^^^^^^^^^^^^^^^^             ------ unexpected argument #2 of type `&HostBounds`
+  |
+note: method defined here
+ --> src/lib.rs
+  |
+  |     pub fn execute_work_order(
+  |            ^^^^^^^^^^^^^^^^^^
+help: remove the extra argument
+  |
+9 -     let _ = journal.execute_work_order(work_order, bounds);
+9 +     let _ = journal.execute_work_order(work_order);
+  |
