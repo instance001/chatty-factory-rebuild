@@ -1909,7 +1909,12 @@ impl RuntimeJournal {
 
     pub fn verify(&self) -> Result<Vec<RuntimeRecordEnvelope>, String> {
         let records = self.read_records_allow_empty()?;
-        verify_records(&records, &self.trace_id, &self.request_id)?;
+        verify_records(
+            &records,
+            &self.trace_id,
+            &self.request_id,
+            &self.host_bounds,
+        )?;
         verify_head_anchor(&records, &self.read_head_anchor()?)?;
         Ok(records)
     }
@@ -2223,7 +2228,12 @@ impl RuntimeJournal {
         fs::create_dir_all(&self.root)
             .map_err(|err| format!("could not create runtime journal: {err}"))?;
         let existing = self.read_records_allow_empty()?;
-        verify_records(&existing, &self.trace_id, &self.request_id)?;
+        verify_records(
+            &existing,
+            &self.trace_id,
+            &self.request_id,
+            &self.host_bounds,
+        )?;
         verify_head_anchor(&existing, &self.read_head_anchor()?)?;
         verify_new_record_topology(record_kind, attempt_id, &parent_record_ids, &existing)?;
 
@@ -2263,7 +2273,7 @@ impl RuntimeJournal {
             .iter()
             .map(|record| (record.record_id.clone(), record.clone()))
             .collect::<BTreeMap<_, _>>();
-        verify_existing_record_topology(&envelope, &by_id)?;
+        verify_existing_record_topology(&envelope, &by_id, &self.host_bounds)?;
         let json = serde_json::to_string(&envelope)
             .map_err(|err| format!("could not serialize runtime record: {err}"))?;
         let path = self.journal_path();
@@ -2396,6 +2406,7 @@ fn verify_records(
     records: &[RuntimeRecordEnvelope],
     trace_id: &str,
     request_id: &str,
+    host_bounds: &HostBounds,
 ) -> Result<(), String> {
     let mut record_ids = BTreeSet::new();
     let mut sequences = BTreeSet::new();
@@ -2460,7 +2471,7 @@ fn verify_records(
         if record.record_hash != expected_hash {
             return Err(format!("record '{}' hash was modified", record.record_id));
         }
-        verify_existing_record_topology(record, &by_id)?;
+        verify_existing_record_topology(record, &by_id, host_bounds)?;
         previous_hash = Some(record.record_hash.clone());
         by_id.insert(record.record_id.clone(), record.clone());
     }
@@ -2470,6 +2481,7 @@ fn verify_records(
 fn verify_existing_record_topology(
     record: &RuntimeRecordEnvelope,
     by_id: &BTreeMap<String, RuntimeRecordEnvelope>,
+    host_bounds: &HostBounds,
 ) -> Result<(), String> {
     verify_parent_shape(record.record_kind, &record.parent_record_ids, by_id)?;
     for parent_id in &record.parent_record_ids {
@@ -2511,13 +2523,14 @@ fn verify_existing_record_topology(
             );
         }
     }
-    verify_semantic_record_bindings(record, by_id)?;
+    verify_semantic_record_bindings(record, by_id, host_bounds)?;
     Ok(())
 }
 
 fn verify_semantic_record_bindings(
     record: &RuntimeRecordEnvelope,
     by_id: &BTreeMap<String, RuntimeRecordEnvelope>,
+    _host_bounds: &HostBounds,
 ) -> Result<(), String> {
     match record.record_kind {
         RuntimeRecordKind::Request => {
@@ -2613,9 +2626,15 @@ fn verify_semantic_record_bindings(
             let verification: VerificationReceipt = decode_payload(record)?;
             let execution_record = only_parent(record, by_id)?;
             let execution: ExecutionReceipt = decode_payload(execution_record)?;
+            let work_order_record = only_parent(execution_record, by_id)?;
+            let gate_record = only_parent(work_order_record, by_id)?;
+            let proposal_record = only_parent(gate_record, by_id)?;
+            let intent_record = only_parent(proposal_record, by_id)?;
+            let intent: ConfirmedIntentReceipt = decode_payload(intent_record)?;
             if verification.receipt_id != format!("verification-{}", verification.attempt_id) {
                 return Err("verification receipt id mismatch".to_string());
             }
+            verify_acceptance_claim_bindings(&verification, &intent)?;
             if verification.trace_id != execution.trace_id
                 || verification.request_id != execution.request_id
                 || verification.attempt_id != execution.attempt_id
@@ -2632,6 +2651,7 @@ fn verify_semantic_record_bindings(
             if failure.receipt_id != format!("failure-{}", failure.attempt_id) {
                 return Err("failure evidence receipt id mismatch".to_string());
             }
+            verify_failure_matches_parent(&failure, parent_record)?;
             if failure.trace_id != record.trace_id
                 || failure.request_id != record.request_id
                 || Some(failure.attempt_id.as_str()) != record.attempt_id.as_deref()
@@ -2654,6 +2674,7 @@ fn verify_semantic_record_bindings(
                 || vault.failure_evidence_receipt_id != failure.receipt_id
                 || vault.failure_evidence_receipt_hash != failure_record.payload_hash
                 || vault.failure_class != failure.failure_class
+                || vault.evidence != failure.evidence
                 || vault.lock_signals != failure.lock_signals
             {
                 return Err("vault semantic binding mismatch".to_string());
@@ -2671,6 +2692,10 @@ fn verify_semantic_record_bindings(
                 || observation.attempt_id != vault.attempt_id
                 || observation.vault_entry_receipt_id != vault.receipt_id
                 || observation.vault_entry_receipt_hash != vault_record.payload_hash
+                || observation.evidence != vault.evidence
+                || vault.lock_signals.len() != 1
+                || observation.scope != vault.lock_signals[0]
+                || observation.lock_signal != vault.lock_signals[0]
             {
                 return Err("failure observation semantic binding mismatch".to_string());
             }
@@ -2797,6 +2822,96 @@ fn record_receipt_id(record: &RuntimeRecordEnvelope) -> Result<String, String> {
         .and_then(|value| value.as_str())
         .map(str::to_string)
         .ok_or_else(|| format!("{:?} payload has no receipt id", record.record_kind))
+}
+
+fn verify_acceptance_claim_bindings(
+    verification: &VerificationReceipt,
+    intent: &ConfirmedIntentReceipt,
+) -> Result<(), String> {
+    let acceptance_claims = intent
+        .derived_claims
+        .iter()
+        .filter(|claim| claim.kind == IntentClaimKind::AcceptanceCriterion)
+        .collect::<Vec<_>>();
+    let expected_ids = acceptance_claims
+        .iter()
+        .map(|claim| claim.claim_id.clone())
+        .collect::<Vec<_>>();
+    if verification.checked_claim_ids != expected_ids {
+        return Err(
+            "verification checked claims are not operator-confirmed acceptance criteria"
+                .to_string(),
+        );
+    }
+    if expected_ids.is_empty() {
+        if verification.success
+            || verification.evidence
+                != vec!["no operator-confirmed acceptance criteria were available".to_string()]
+        {
+            return Err(
+                "verification without acceptance criteria must fail with host evidence".to_string(),
+            );
+        }
+        return Ok(());
+    }
+    if verification.evidence.len() != acceptance_claims.len() {
+        return Err("verification evidence does not cover checked acceptance claims".to_string());
+    }
+    let mut saw_failure = false;
+    for (claim, evidence) in acceptance_claims.iter().zip(verification.evidence.iter()) {
+        let pass = format!("claim '{}' passed", claim.claim_id);
+        let fail = format!("claim '{}' failed: {}", claim.claim_id, claim.text);
+        if evidence == &fail {
+            saw_failure = true;
+        } else if evidence != &pass {
+            return Err(
+                "verification evidence is not bound to checked acceptance claims".to_string(),
+            );
+        }
+    }
+    if verification.success == saw_failure {
+        return Err("verification success flag conflicts with acceptance evidence".to_string());
+    }
+    Ok(())
+}
+
+fn verify_failure_matches_parent(
+    failure: &FailureEvidenceReceipt,
+    parent_record: &RuntimeRecordEnvelope,
+) -> Result<(), String> {
+    match parent_record.record_kind {
+        RuntimeRecordKind::GateReceipt => {
+            let gate: GateReceipt = decode_payload(parent_record)?;
+            if !gate.admissible {
+                if failure.failure_class != FailureClass::AdmissibilityRejected
+                    || failure.evidence != gate.reasons
+                {
+                    return Err("failure evidence does not match blocked gate parent".to_string());
+                }
+            }
+        }
+        RuntimeRecordKind::VerificationReceipt => {
+            let verification: VerificationReceipt = decode_payload(parent_record)?;
+            if verification.success {
+                return Err("successful verification cannot parent failure evidence".to_string());
+            }
+            if failure.failure_class != FailureClass::VerificationFailed
+                || failure.evidence != verification.evidence
+            {
+                return Err(
+                    "failure evidence does not match failed verification parent".to_string()
+                );
+            }
+        }
+        RuntimeRecordKind::WorkOrderReceipt => {
+            if failure.failure_class != FailureClass::ExecutionFailed || failure.evidence.is_empty()
+            {
+                return Err("failure evidence does not match execution failure parent".to_string());
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 fn expected_spend_authority_for_parent(
@@ -6388,9 +6503,9 @@ mod tests {
             attempt_id: "attempt-1".to_string(),
             execution_receipt_id: execution.receipt_id.clone(),
             execution_receipt_hash: "wrong-execution-hash".to_string(),
-            success: false,
-            checked_claim_ids: vec![],
-            evidence: vec![],
+            success: true,
+            checked_claim_ids: vec!["accept-1".to_string()],
+            evidence: vec!["claim 'accept-1' passed".to_string()],
         };
         assert!(journal
             .append_verification_receipt(execution_record.record_id.clone(), &bad_verification)
@@ -6431,6 +6546,274 @@ mod tests {
             .append_failure_observation(vault_record.record_id, &observation)
             .unwrap_err()
             .contains("failure observation semantic binding mismatch"));
+    }
+
+    #[test]
+    fn vault_evidence_must_match_failure_evidence() {
+        let runtime = tempfile::tempdir().unwrap();
+        let intent = intent();
+        let method = proposal("proposal-a", "README.md", "hello");
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
+        let request = journal
+            .append_request(&intent.receipt().exact_request)
+            .unwrap();
+        let confirmed = journal
+            .append_confirmed_intent_receipt(request.record_id, &intent)
+            .unwrap();
+        let proposal_record = journal
+            .append_proposal("attempt-1", confirmed.record_id, &method)
+            .unwrap();
+        let mut gate = gate_attempt_receipt(
+            "trace-1",
+            "attempt-1",
+            &intent,
+            &method,
+            &bounds(Path::new(".")),
+            &[],
+        );
+        gate.admissible = false;
+        gate.reasons = vec!["host rejected method".to_string()];
+        let gate_record = journal
+            .append_gate_receipt(proposal_record.record_id, &gate)
+            .unwrap();
+        let (failure, mut vault, _observation) =
+            failure_receipts_from_gate(&gate, FailureClass::AdmissibilityRejected, None);
+        let failure_record = journal
+            .append_failure_evidence(gate_record.record_id, &failure)
+            .unwrap();
+        vault.evidence = vec!["broader learned failure".to_string()];
+
+        assert!(journal
+            .append_vault_entry(failure_record.record_id, &vault)
+            .unwrap_err()
+            .contains("vault semantic binding mismatch"));
+    }
+
+    #[test]
+    fn failure_observation_scope_must_match_vault_lock_signal() {
+        let runtime = tempfile::tempdir().unwrap();
+        let intent = intent();
+        let method = proposal("proposal-a", "README.md", "hello");
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
+        let request = journal
+            .append_request(&intent.receipt().exact_request)
+            .unwrap();
+        let confirmed = journal
+            .append_confirmed_intent_receipt(request.record_id, &intent)
+            .unwrap();
+        let proposal_record = journal
+            .append_proposal("attempt-1", confirmed.record_id, &method)
+            .unwrap();
+        let mut gate = gate_attempt_receipt(
+            "trace-1",
+            "attempt-1",
+            &intent,
+            &method,
+            &bounds(Path::new(".")),
+            &[],
+        );
+        gate.admissible = false;
+        gate.reasons = vec!["host rejected method".to_string()];
+        let gate_record = journal
+            .append_gate_receipt(proposal_record.record_id, &gate)
+            .unwrap();
+        let (failure, vault, mut observation) =
+            failure_receipts_from_gate(&gate, FailureClass::AdmissibilityRejected, None);
+        let failure_record = journal
+            .append_failure_evidence(gate_record.record_id, &failure)
+            .unwrap();
+        let vault_record = journal
+            .append_vault_entry(failure_record.record_id, &vault)
+            .unwrap();
+        observation.scope = "write:OTHER.md".to_string();
+        observation.lock_signal = "write:OTHER.md".to_string();
+
+        assert!(journal
+            .append_failure_observation(vault_record.record_id, &observation)
+            .unwrap_err()
+            .contains("failure observation semantic binding mismatch"));
+    }
+
+    #[test]
+    fn blocked_gate_failure_evidence_must_match_gate_rejection() {
+        let runtime = tempfile::tempdir().unwrap();
+        let intent = intent();
+        let method = MethodProposal::new("proposal-blocked", "external method", vec![], vec![]);
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
+        let request = journal
+            .append_request(&intent.receipt().exact_request)
+            .unwrap();
+        let confirmed = journal
+            .append_confirmed_intent_receipt(request.record_id, &intent)
+            .unwrap();
+        let proposal_record = journal
+            .append_proposal("attempt-1", confirmed.record_id, &method)
+            .unwrap();
+        let gate = gate_attempt_receipt(
+            "trace-1",
+            "attempt-1",
+            &intent,
+            &method,
+            &bounds(Path::new(".")),
+            &[],
+        );
+        let gate_record = journal
+            .append_gate_receipt(proposal_record.record_id, &gate)
+            .unwrap();
+        let (mut failure, _vault, _observation) =
+            failure_receipts_from_gate(&gate, FailureClass::AdmissibilityRejected, None);
+        failure.failure_class = FailureClass::VerificationFailed;
+
+        assert!(journal
+            .append_failure_evidence(gate_record.record_id, &failure)
+            .unwrap_err()
+            .contains("failure evidence does not match blocked gate parent"));
+    }
+
+    #[test]
+    fn verification_failure_evidence_must_match_verification_receipt() {
+        let workspace = tempfile::tempdir().unwrap();
+        let runtime = tempfile::tempdir().unwrap();
+        let intent = intent();
+        let method = proposal("proposal-a", "README.md", "wrong");
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(workspace.path()),
+        );
+        let allowed = journal.issue_allowed_attempt(&intent, &method).unwrap();
+        let gate_record_id = allowed.gate_record_id.clone();
+        let gate = allowed.gate_receipt.clone();
+        let work_order = journal
+            .authorize_work_order(allowed, &intent, &method)
+            .unwrap();
+        let work_order_record_id = work_order.work_order_record_id.clone();
+        let execution = journal.execute_work_order(work_order).unwrap();
+        let execution_record = journal
+            .append_execution_receipt(work_order_record_id, &execution)
+            .unwrap();
+        let verification = verify_against_intent(&execution, &intent, &bounds(workspace.path()));
+        let verification_record = journal
+            .append_verification_receipt(execution_record.record_id, &verification)
+            .unwrap();
+        let (mut failure, _vault, _observation) = failure_receipts_from_parent(
+            &gate,
+            verification.receipt_id.clone(),
+            verification_record.payload_hash.clone(),
+            FailureClass::VerificationFailed,
+            verification.evidence.clone(),
+            Some("write:README.md".to_string()),
+        );
+        failure.evidence = vec!["different failure evidence".to_string()];
+
+        assert!(journal
+            .append_failure_evidence(verification_record.record_id, &failure)
+            .unwrap_err()
+            .contains("failure evidence does not match failed verification parent"));
+        assert!(journal.verify().unwrap().iter().any(|record| {
+            record.record_kind == RuntimeRecordKind::GateReceipt
+                && record.record_id == gate_record_id
+        }));
+    }
+
+    #[test]
+    fn verification_checked_claims_must_be_operator_confirmed_acceptance() {
+        let workspace = tempfile::tempdir().unwrap();
+        let runtime = tempfile::tempdir().unwrap();
+        let intent = intent();
+        let method = proposal("proposal-a", "README.md", "hello");
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(workspace.path()),
+        );
+        let allowed = journal.issue_allowed_attempt(&intent, &method).unwrap();
+        let work_order = journal
+            .authorize_work_order(allowed, &intent, &method)
+            .unwrap();
+        let work_order_record_id = work_order.work_order_record_id.clone();
+        let execution = journal.execute_work_order(work_order).unwrap();
+        let execution_record = journal
+            .append_execution_receipt(work_order_record_id, &execution)
+            .unwrap();
+        let model_picked_verification = VerificationReceipt {
+            receipt_id: "verification-attempt-1".to_string(),
+            trace_id: "trace-1".to_string(),
+            request_id: "request-1".to_string(),
+            attempt_id: "attempt-1".to_string(),
+            execution_receipt_id: execution.receipt_id.clone(),
+            execution_receipt_hash: execution_record.payload_hash.clone(),
+            success: true,
+            checked_claim_ids: vec!["model-suggested-check".to_string()],
+            evidence: vec!["claim 'model-suggested-check' passed".to_string()],
+        };
+
+        assert!(journal
+            .append_verification_receipt(
+                execution_record.record_id.clone(),
+                &model_picked_verification
+            )
+            .unwrap_err()
+            .contains("verification checked claims are not operator-confirmed"));
+    }
+
+    #[test]
+    fn verification_success_must_match_acceptance_evidence_shape() {
+        let workspace = tempfile::tempdir().unwrap();
+        let runtime = tempfile::tempdir().unwrap();
+        let intent = intent();
+        let method = proposal("proposal-a", "README.md", "hello");
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(workspace.path()),
+        );
+        let allowed = journal.issue_allowed_attempt(&intent, &method).unwrap();
+        let work_order = journal
+            .authorize_work_order(allowed, &intent, &method)
+            .unwrap();
+        let work_order_record_id = work_order.work_order_record_id.clone();
+        let execution = journal.execute_work_order(work_order).unwrap();
+        let execution_record = journal
+            .append_execution_receipt(work_order_record_id, &execution)
+            .unwrap();
+        let contradictory_verification = VerificationReceipt {
+            receipt_id: "verification-attempt-1".to_string(),
+            trace_id: "trace-1".to_string(),
+            request_id: "request-1".to_string(),
+            attempt_id: "attempt-1".to_string(),
+            execution_receipt_id: execution.receipt_id.clone(),
+            execution_receipt_hash: execution_record.payload_hash.clone(),
+            success: true,
+            checked_claim_ids: vec!["accept-1".to_string()],
+            evidence: vec!["claim 'accept-1' failed: file_contains:README.md::hello".to_string()],
+        };
+
+        assert!(journal
+            .append_verification_receipt(
+                execution_record.record_id.clone(),
+                &contradictory_verification
+            )
+            .unwrap_err()
+            .contains("verification success flag conflicts"));
     }
 
     #[test]
