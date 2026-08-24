@@ -2025,6 +2025,57 @@ impl RuntimeJournal {
         )
     }
 
+    pub fn record_isolated_promotion_candidate(
+        &self,
+        handles: &[JournalBackedFailureHandle],
+        isolated_fault_condition: impl Into<String>,
+    ) -> Result<(RuntimeRecordEnvelope, RuntimeRecordEnvelope), String> {
+        let triangulation =
+            isolate_bounded_fault_condition(self, handles, isolated_fault_condition)?;
+        let parent_vault_record_ids = triangulation.source_vault_record_ids.clone();
+        let triangulation_record = self.append_record_internal(
+            RuntimeRecordKind::TriangulationReceipt,
+            None,
+            parent_vault_record_ids,
+            &triangulation,
+        )?;
+        let candidate = candidate_from_triangulation(
+            &triangulation,
+            triangulation_record.payload_hash.clone(),
+        )?;
+        let candidate_record = self.append_record_internal(
+            RuntimeRecordKind::PromotionCandidate,
+            None,
+            vec![triangulation_record.record_id.clone()],
+            &candidate,
+        )?;
+        Ok((triangulation_record, candidate_record))
+    }
+
+    pub fn approve_promotion_candidate(
+        &self,
+        candidate_record_id: &str,
+        approval_assertion: ExternalOperatorAssertionReceipt,
+    ) -> Result<RuntimeRecordEnvelope, String> {
+        let records = self.verify()?;
+        let candidate_record = find_record(&records, candidate_record_id)?;
+        if candidate_record.record_kind != RuntimeRecordKind::PromotionCandidate {
+            return Err("record is not a promotion candidate".to_string());
+        }
+        let candidate: ConstraintPromotionCandidateReceipt = decode_payload(candidate_record)?;
+        let approval = approve_promotion_receipt(
+            &candidate,
+            candidate_record.payload_hash.clone(),
+            approval_assertion,
+        )?;
+        self.append_record_internal(
+            RuntimeRecordKind::PromotionApproval,
+            None,
+            vec![candidate_record.record_id.clone()],
+            &approval,
+        )
+    }
+
     fn append_external_attempt_gate(
         &self,
         attempt_id: &str,
@@ -3321,7 +3372,6 @@ fn triangulate_failures_with_id(
     })
 }
 
-#[cfg(test)]
 fn isolate_bounded_fault_condition(
     journal: &RuntimeJournal,
     handles: &[JournalBackedFailureHandle],
@@ -3426,7 +3476,6 @@ fn success_does_not_resolve_prior_evidence(
     receipt
 }
 
-#[cfg(test)]
 fn candidate_from_triangulation(
     triangulation: &TriangulationReceipt,
     triangulation_record_hash: impl Into<String>,
@@ -3465,7 +3514,6 @@ fn candidate_from_triangulation(
     })
 }
 
-#[cfg(test)]
 fn promotion_candidate_receipt_id(
     triangulation: &TriangulationReceipt,
     triangulation_record_hash: &str,
@@ -3486,7 +3534,6 @@ fn promotion_candidate_receipt_id(
     Ok(format!("promotion-candidate-{}", &hash[..16]))
 }
 
-#[cfg(test)]
 fn approve_promotion_receipt(
     candidate: &ConstraintPromotionCandidateReceipt,
     candidate_receipt_hash: impl Into<String>,
@@ -3505,7 +3552,6 @@ fn approve_promotion_receipt(
     })
 }
 
-#[cfg(test)]
 fn promotion_approval_receipt_id(
     candidate: &ConstraintPromotionCandidateReceipt,
     candidate_receipt_hash: &str,
@@ -4507,6 +4553,277 @@ mod tests {
         assert!(promotion
             .constraint_id()
             .starts_with("constraint-from-promotion-candidate-"));
+    }
+
+    #[test]
+    fn record_isolated_promotion_candidate_persists_inactive_candidate() {
+        let runtime = tempfile::tempdir().unwrap();
+        let intent = intent();
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
+        let (vault_a, handle_a) = append_attempt_failure(
+            &journal,
+            "attempt-1",
+            &intent,
+            &proposal("proposal-a", "README.md", "wrong-a"),
+        );
+        let (vault_b, handle_b) = append_attempt_failure(
+            &journal,
+            "attempt-2",
+            &intent,
+            &proposal("proposal-b", "README.md", "wrong-b"),
+        );
+        let (vault_c, handle_c) = append_attempt_failure(
+            &journal,
+            "attempt-3",
+            &intent,
+            &proposal("proposal-c", "README.md", "wrong-c"),
+        );
+
+        let (triangulation_record, candidate_record) = journal
+            .record_isolated_promotion_candidate(
+                &[handle_a, handle_b, handle_c],
+                "exact write to README.md repeatedly fails acceptance despite materially different attempts",
+            )
+            .unwrap();
+
+        assert_eq!(
+            triangulation_record.record_kind(),
+            RuntimeRecordKind::TriangulationReceipt
+        );
+        assert_eq!(
+            candidate_record.record_kind(),
+            RuntimeRecordKind::PromotionCandidate
+        );
+        assert_eq!(
+            triangulation_record.parent_record_ids(),
+            &[vault_a, vault_b, vault_c]
+        );
+        assert_eq!(
+            candidate_record.parent_record_ids(),
+            &[triangulation_record.record_id().to_string()]
+        );
+        let triangulation: TriangulationReceipt =
+            serde_json::from_value(triangulation_record.payload().clone()).unwrap();
+        let candidate: ConstraintPromotionCandidateReceipt =
+            serde_json::from_value(candidate_record.payload().clone()).unwrap();
+        assert_eq!(triangulation.status(), &TriangulationStatus::Isolated);
+        assert_eq!(
+            candidate.triangulation_receipt_hash(),
+            triangulation_record.payload_hash()
+        );
+        assert_eq!(candidate.lock_signal(), "write:README.md");
+        assert!(journal.active_promoted_constraints().unwrap().is_empty());
+        let records = journal.verify().unwrap();
+        assert!(!records
+            .iter()
+            .any(|record| record.record_kind == RuntimeRecordKind::PromotionApproval));
+        assert!(!records
+            .iter()
+            .any(|record| record.record_kind == RuntimeRecordKind::CapabilitySpend));
+    }
+
+    #[test]
+    fn record_isolated_promotion_candidate_rejects_insufficient_or_contradictory_evidence() {
+        let runtime = tempfile::tempdir().unwrap();
+        let intent = intent();
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
+        let (_vault_a, handle_a) = append_attempt_failure(
+            &journal,
+            "attempt-1",
+            &intent,
+            &proposal("proposal-a", "README.md", "wrong-a"),
+        );
+        let (_vault_b, handle_b) = append_attempt_failure(
+            &journal,
+            "attempt-2",
+            &intent,
+            &proposal("proposal-b", "README.md", "wrong-b"),
+        );
+
+        assert!(journal
+            .record_isolated_promotion_candidate(&[handle_a, handle_b], "two labels are not enough")
+            .unwrap_err()
+            .contains("more than two accumulated failures"));
+
+        let (_vault_c, handle_c) = append_attempt_failure_with_lock(
+            &journal,
+            "attempt-3",
+            &intent,
+            &proposal("proposal-c", "README.md", "wrong-c"),
+            Some("write:OTHER.md".to_string()),
+        );
+        let (_vault_d, handle_d) = append_attempt_failure_with_lock(
+            &journal,
+            "attempt-4",
+            &intent,
+            &proposal("proposal-d", "README.md", "wrong-d"),
+            Some("write:THIRD.md".to_string()),
+        );
+        let (_vault_e, handle_e) = append_attempt_failure_with_lock(
+            &journal,
+            "attempt-5",
+            &intent,
+            &proposal("proposal-e", "README.md", "wrong-e"),
+            Some("write:FOURTH.md".to_string()),
+        );
+
+        assert!(journal
+            .record_isolated_promotion_candidate(
+                &[handle_c, handle_d, handle_e],
+                "contradictory evidence is not isolated",
+            )
+            .unwrap_err()
+            .contains("narrowed lock signal"));
+        let records = journal.verify().unwrap();
+        assert!(!records
+            .iter()
+            .any(|record| record.record_kind == RuntimeRecordKind::PromotionCandidate));
+        assert!(!records
+            .iter()
+            .any(|record| record.record_kind == RuntimeRecordKind::PromotionApproval));
+    }
+
+    #[test]
+    fn approve_promotion_candidate_persists_approval_without_activation() {
+        let runtime = tempfile::tempdir().unwrap();
+        let intent = intent();
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
+        let (_vault_a, handle_a) = append_attempt_failure(
+            &journal,
+            "attempt-1",
+            &intent,
+            &proposal("proposal-a", "README.md", "wrong-a"),
+        );
+        let (_vault_b, handle_b) = append_attempt_failure(
+            &journal,
+            "attempt-2",
+            &intent,
+            &proposal("proposal-b", "README.md", "wrong-b"),
+        );
+        let (_vault_c, handle_c) = append_attempt_failure(
+            &journal,
+            "attempt-3",
+            &intent,
+            &proposal("proposal-c", "README.md", "wrong-c"),
+        );
+        let (_triangulation_record, candidate_record) = journal
+            .record_isolated_promotion_candidate(
+                &[handle_a, handle_b, handle_c],
+                "exact write to README.md repeatedly fails acceptance despite materially different attempts",
+            )
+            .unwrap();
+
+        let approval_record = journal
+            .approve_promotion_candidate(
+                candidate_record.record_id(),
+                external_operator_assertion("operator-approval"),
+            )
+            .unwrap();
+
+        assert_eq!(
+            approval_record.record_kind(),
+            RuntimeRecordKind::PromotionApproval
+        );
+        assert_eq!(
+            approval_record.parent_record_ids(),
+            &[candidate_record.record_id().to_string()]
+        );
+        let approval: PromotionApprovalReceipt =
+            serde_json::from_value(approval_record.payload().clone()).unwrap();
+        assert_eq!(
+            approval.candidate_receipt_hash(),
+            candidate_record.payload_hash()
+        );
+        assert!(journal.active_promoted_constraints().unwrap().is_empty());
+        assert!(journal
+            .reissue_promotion_capability(approval_record.record_id())
+            .is_ok());
+    }
+
+    #[test]
+    fn approve_promotion_candidate_rejects_non_candidate_or_forged_assertion() {
+        let runtime = tempfile::tempdir().unwrap();
+        let intent = intent();
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
+        let (_vault_a, handle_a) = append_attempt_failure(
+            &journal,
+            "attempt-1",
+            &intent,
+            &proposal("proposal-a", "README.md", "wrong-a"),
+        );
+        let (_vault_b, handle_b) = append_attempt_failure(
+            &journal,
+            "attempt-2",
+            &intent,
+            &proposal("proposal-b", "README.md", "wrong-b"),
+        );
+        let (_vault_c, handle_c) = append_attempt_failure(
+            &journal,
+            "attempt-3",
+            &intent,
+            &proposal("proposal-c", "README.md", "wrong-c"),
+        );
+        let (_vault_d, handle_d) = append_attempt_failure(
+            &journal,
+            "attempt-4",
+            &intent,
+            &proposal("proposal-d", "README.md", "wrong-d"),
+        );
+        let (_vault_e, handle_e) = append_attempt_failure(
+            &journal,
+            "attempt-5",
+            &intent,
+            &proposal("proposal-e", "README.md", "wrong-e"),
+        );
+        let triangulation_record = journal.record_triangulation(&[handle_a, handle_b]).unwrap();
+
+        assert!(journal
+            .approve_promotion_candidate(
+                triangulation_record.record_id(),
+                external_operator_assertion("operator-approval"),
+            )
+            .unwrap_err()
+            .contains("not a promotion candidate"));
+        assert!(journal
+            .approve_promotion_candidate(
+                "missing-candidate",
+                external_operator_assertion("operator-approval"),
+            )
+            .is_err());
+
+        let (_triangulation_record, candidate_record) = journal
+            .record_isolated_promotion_candidate(
+                &[handle_c, handle_d, handle_e],
+                "exact write to README.md repeatedly fails acceptance despite materially different attempts",
+            )
+            .unwrap();
+        let mut forged_assertion = external_operator_assertion("operator-approval");
+        forged_assertion.statement = "cryptographically verified human identity".to_string();
+
+        assert!(journal
+            .approve_promotion_candidate(candidate_record.record_id(), forged_assertion)
+            .unwrap_err()
+            .contains("external operator assertion statement mismatch"));
     }
 
     #[test]

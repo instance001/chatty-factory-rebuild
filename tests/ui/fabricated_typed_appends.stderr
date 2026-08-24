@@ -152,7 +152,13 @@ error[E0599]: no method named `append_promotion_candidate` found for struct `Run
   --> tests/ui/fabricated_typed_appends.rs:12:21
    |
 12 |     let _ = journal.append_promotion_candidate(String::new(), todo!());
-   |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^ method not found in `RuntimeJournal`
+   |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: there is a method `approve_promotion_candidate` with a similar name
+   |
+12 -     let _ = journal.append_promotion_candidate(String::new(), todo!());
+12 +     let _ = journal.approve_promotion_candidate(String::new(), todo!());
+   |
 
 warning: unreachable call
   --> tests/ui/fabricated_typed_appends.rs:12:21

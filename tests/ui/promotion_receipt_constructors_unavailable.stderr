@@ -1,25 +1,33 @@
-error[E0432]: unresolved imports `chatty_factory_rebuild::approve_promotion_receipt`, `chatty_factory_rebuild::candidate_from_triangulation`
+error[E0603]: function `approve_promotion_receipt` is private
  --> tests/ui/promotion_receipt_constructors_unavailable.rs:1:30
   |
 1 | use chatty_factory_rebuild::{approve_promotion_receipt, candidate_from_triangulation};
-  |                              ^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no `candidate_from_triangulation` in the root
-  |                              |
-  |                              no `approve_promotion_receipt` in the root
+  |                              ^^^^^^^^^^^^^^^^^^^^^^^^^ private function
   |
-note: found an item that was configured out
+note: the function `approve_promotion_receipt` is defined here
  --> src/lib.rs
   |
-  | #[cfg(test)]
-  |       ---- the item is gated here
-  | fn approve_promotion_receipt(
-  |    ^^^^^^^^^^^^^^^^^^^^^^^^^
-note: found an item that was configured out
+  | / fn approve_promotion_receipt(
+  | |     candidate: &ConstraintPromotionCandidateReceipt,
+  | |     candidate_receipt_hash: impl Into<String>,
+  | |     assertion: ExternalOperatorAssertionReceipt,
+  | | ) -> Result<PromotionApprovalReceipt, String> {
+  | |_____________________________________________^
+
+error[E0603]: function `candidate_from_triangulation` is private
+ --> tests/ui/promotion_receipt_constructors_unavailable.rs:1:57
+  |
+1 | use chatty_factory_rebuild::{approve_promotion_receipt, candidate_from_triangulation};
+  |                                                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ private function
+  |
+note: the function `candidate_from_triangulation` is defined here
  --> src/lib.rs
   |
-  | #[cfg(test)]
-  |       ---- the item is gated here
-  | fn candidate_from_triangulation(
-  |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  | / fn candidate_from_triangulation(
+  | |     triangulation: &TriangulationReceipt,
+  | |     triangulation_record_hash: impl Into<String>,
+  | | ) -> Result<ConstraintPromotionCandidateReceipt, String> {
+  | |________________________________________________________^
 
 warning: unreachable expression
  --> tests/ui/promotion_receipt_constructors_unavailable.rs:4:73

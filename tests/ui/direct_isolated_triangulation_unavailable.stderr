@@ -1,16 +1,18 @@
-error[E0432]: unresolved import `chatty_factory_rebuild::isolate_bounded_fault_condition`
- --> tests/ui/direct_isolated_triangulation_unavailable.rs:1:5
+error[E0603]: function `isolate_bounded_fault_condition` is private
+ --> tests/ui/direct_isolated_triangulation_unavailable.rs:1:29
   |
 1 | use chatty_factory_rebuild::isolate_bounded_fault_condition;
-  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no `isolate_bounded_fault_condition` in the root
+  |                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ private function
   |
-note: found an item that was configured out
+note: the function `isolate_bounded_fault_condition` is defined here
  --> src/lib.rs
   |
-  | #[cfg(test)]
-  |       ---- the item is gated here
-  | fn isolate_bounded_fault_condition(
-  |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  | / fn isolate_bounded_fault_condition(
+  | |     journal: &RuntimeJournal,
+  | |     handles: &[JournalBackedFailureHandle],
+  | |     isolated_fault_condition: impl Into<String>,
+  | | ) -> Result<TriangulationReceipt, String> {
+  | |_________________________________________^
 
 warning: unreachable expression
  --> tests/ui/direct_isolated_triangulation_unavailable.rs:4:54
