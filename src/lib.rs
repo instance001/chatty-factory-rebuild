@@ -1874,7 +1874,7 @@ impl RuntimeJournal {
                     work_order_receipt_hash,
                     &gate,
                     FailureClass::ExecutionFailed,
-                    vec![err],
+                    execution_failure_evidence(err),
                     proposal_lock_signals(externally_supplied_proposal)
                         .into_iter()
                         .next(),
@@ -2274,6 +2274,7 @@ impl RuntimeJournal {
             .map(|record| (record.record_id.clone(), record.clone()))
             .collect::<BTreeMap<_, _>>();
         verify_existing_record_topology(&envelope, &by_id, &self.host_bounds)?;
+        reject_duplicate_capability_spend(&envelope, existing.iter())?;
         let json = serde_json::to_string(&envelope)
             .map_err(|err| format!("could not serialize runtime record: {err}"))?;
         let path = self.journal_path();
@@ -2411,6 +2412,7 @@ fn verify_records(
     let mut record_ids = BTreeSet::new();
     let mut sequences = BTreeSet::new();
     let mut by_id = BTreeMap::new();
+    let mut spent_capabilities = BTreeSet::new();
     let mut previous_hash = None;
     for (index, record) in records.iter().enumerate() {
         if record.trace_id != trace_id {
@@ -2472,10 +2474,38 @@ fn verify_records(
             return Err(format!("record '{}' hash was modified", record.record_id));
         }
         verify_existing_record_topology(record, &by_id, host_bounds)?;
+        if record.record_kind == RuntimeRecordKind::CapabilitySpend {
+            let spend = capability_spend(record)?;
+            if !spent_capabilities.insert(spend.capability_id) {
+                return Err("duplicate capability spend".to_string());
+            }
+        }
         previous_hash = Some(record.record_hash.clone());
         by_id.insert(record.record_id.clone(), record.clone());
     }
     Ok(())
+}
+
+fn reject_duplicate_capability_spend<'a>(
+    record: &RuntimeRecordEnvelope,
+    existing: impl Iterator<Item = &'a RuntimeRecordEnvelope>,
+) -> Result<(), String> {
+    if record.record_kind != RuntimeRecordKind::CapabilitySpend {
+        return Ok(());
+    }
+    let spend = capability_spend(record)?;
+    for existing_record in existing {
+        if existing_record.record_kind == RuntimeRecordKind::CapabilitySpend
+            && capability_spend(existing_record)?.capability_id == spend.capability_id
+        {
+            return Err("duplicate capability spend".to_string());
+        }
+    }
+    Ok(())
+}
+
+fn capability_spend(record: &RuntimeRecordEnvelope) -> Result<CapabilitySpendReceipt, String> {
+    decode_payload(record)
 }
 
 fn verify_existing_record_topology(
@@ -2651,7 +2681,7 @@ fn verify_semantic_record_bindings(
             if failure.receipt_id != format!("failure-{}", failure.attempt_id) {
                 return Err("failure evidence receipt id mismatch".to_string());
             }
-            verify_failure_matches_parent(&failure, parent_record)?;
+            verify_failure_matches_parent(&failure, parent_record, by_id)?;
             if failure.trace_id != record.trace_id
                 || failure.request_id != record.request_id
                 || Some(failure.attempt_id.as_str()) != record.attempt_id.as_deref()
@@ -2716,6 +2746,18 @@ fn verify_semantic_record_bindings(
             if triangulation.receipt_id != expected_receipt_id {
                 return Err("triangulation receipt id mismatch".to_string());
             }
+            if triangulation.status == TriangulationStatus::Isolated
+                && (triangulation.lock_signal.as_deref() == Some("unknown_lock_signal")
+                    || triangulation.lock_signal.is_none()
+                    || triangulation
+                        .isolated_fault_condition
+                        .as_deref()
+                        .map(str::trim)
+                        .unwrap_or_default()
+                        .is_empty())
+            {
+                return Err("isolated triangulation semantic binding mismatch".to_string());
+            }
             if triangulation.trace_id != record.trace_id
                 || triangulation.request_id != record.request_id
                 || triangulation.source_vault_record_ids != record.parent_record_ids
@@ -2738,6 +2780,8 @@ fn verify_semantic_record_bindings(
                 return Err("promotion candidate receipt id mismatch".to_string());
             }
             if triangulation.status != TriangulationStatus::Isolated
+                || candidate.lock_signal == "unknown_lock_signal"
+                || candidate.scope != candidate.lock_signal
                 || candidate.trace_id != triangulation.trace_id
                 || candidate.request_id != triangulation.request_id
                 || candidate.triangulation_receipt_id != triangulation.receipt_id
@@ -2878,10 +2922,12 @@ fn verify_acceptance_claim_bindings(
 fn verify_failure_matches_parent(
     failure: &FailureEvidenceReceipt,
     parent_record: &RuntimeRecordEnvelope,
+    by_id: &BTreeMap<String, RuntimeRecordEnvelope>,
 ) -> Result<(), String> {
     match parent_record.record_kind {
         RuntimeRecordKind::GateReceipt => {
             let gate: GateReceipt = decode_payload(parent_record)?;
+            verify_failure_lock_signals(failure, parent_record, by_id)?;
             if !gate.admissible {
                 if failure.failure_class != FailureClass::AdmissibilityRejected
                     || failure.evidence != gate.reasons
@@ -2894,6 +2940,7 @@ fn verify_failure_matches_parent(
         }
         RuntimeRecordKind::VerificationReceipt => {
             let verification: VerificationReceipt = decode_payload(parent_record)?;
+            verify_failure_lock_signals(failure, parent_record, by_id)?;
             if verification.success {
                 return Err("successful verification cannot parent failure evidence".to_string());
             }
@@ -2906,7 +2953,10 @@ fn verify_failure_matches_parent(
             }
         }
         RuntimeRecordKind::WorkOrderReceipt => {
-            if failure.failure_class != FailureClass::ExecutionFailed || failure.evidence.is_empty()
+            verify_failure_lock_signals(failure, parent_record, by_id)?;
+            if failure.failure_class != FailureClass::ExecutionFailed
+                || failure.evidence.len() != 1
+                || !failure.evidence[0].starts_with("execution failed: ")
             {
                 return Err("failure evidence does not match execution failure parent".to_string());
             }
@@ -2914,6 +2964,54 @@ fn verify_failure_matches_parent(
         _ => {}
     }
     Ok(())
+}
+
+fn verify_failure_lock_signals(
+    failure: &FailureEvidenceReceipt,
+    parent_record: &RuntimeRecordEnvelope,
+    by_id: &BTreeMap<String, RuntimeRecordEnvelope>,
+) -> Result<(), String> {
+    let expected = expected_lock_signals_for_failure_parent(parent_record, by_id)?;
+    if failure.lock_signals != expected {
+        return Err("failure lock signals do not match gated proposal".to_string());
+    }
+    Ok(())
+}
+
+fn expected_lock_signals_for_failure_parent(
+    parent_record: &RuntimeRecordEnvelope,
+    by_id: &BTreeMap<String, RuntimeRecordEnvelope>,
+) -> Result<Vec<String>, String> {
+    let proposal_record = match parent_record.record_kind {
+        RuntimeRecordKind::GateReceipt => only_parent(parent_record, by_id)?,
+        RuntimeRecordKind::WorkOrderReceipt => {
+            let gate_record = only_parent(parent_record, by_id)?;
+            only_parent(gate_record, by_id)?
+        }
+        RuntimeRecordKind::VerificationReceipt => {
+            let execution_record = only_parent(parent_record, by_id)?;
+            let work_order_record = only_parent(execution_record, by_id)?;
+            let gate_record = only_parent(work_order_record, by_id)?;
+            only_parent(gate_record, by_id)?
+        }
+        _ => return Ok(failure_lock_fallback()),
+    };
+    let proposal: MethodProposal = decode_payload(proposal_record)?;
+    let signals = proposal_lock_signals(&proposal)
+        .into_iter()
+        .collect::<Vec<_>>();
+    if signals.is_empty() {
+        return Ok(failure_lock_fallback());
+    }
+    Ok(signals)
+}
+
+fn failure_lock_fallback() -> Vec<String> {
+    vec!["unknown_lock_signal".to_string()]
+}
+
+fn execution_failure_evidence(error: impl Into<String>) -> Vec<String> {
+    vec![format!("execution failed: {}", error.into())]
 }
 
 fn expected_spend_authority_for_parent(
@@ -3405,7 +3503,7 @@ fn run_minimal_slice(
         Ok(work_order) => work_order,
         Err(err) => {
             let mut failed_gate = gate;
-            failed_gate.reasons.push(err);
+            failed_gate.reasons.extend(execution_failure_evidence(err));
             failed_gate.admissible = false;
             let (failure, vault, observation) =
                 failure_receipts_from_gate(&failed_gate, FailureClass::AdmissibilityRejected, None);
@@ -3615,6 +3713,9 @@ fn isolate_bounded_fault_condition(
             "cannot isolate bounded fault condition without a narrowed lock signal".to_string(),
         );
     }
+    if receipt.lock_signal.as_deref() == Some("unknown_lock_signal") {
+        return Err("cannot isolate bounded fault condition from unknown lock signal".to_string());
+    }
     if handles.len() < 3 {
         return Err(
             "bounded fault isolation requires more than two accumulated failures".to_string(),
@@ -3734,6 +3835,9 @@ fn candidate_from_triangulation(
         .lock_signal
         .clone()
         .ok_or_else(|| "isolated triangulation has no lock signal".to_string())?;
+    if lock_signal == "unknown_lock_signal" {
+        return Err("unknown lock signal cannot create a promotion candidate".to_string());
+    }
     let isolated_fault_condition = triangulation
         .isolated_fault_condition
         .clone()
@@ -3822,10 +3926,7 @@ fn failure_receipts_from_gate(
     VaultEntryReceipt,
     FailureObservationReceipt,
 ) {
-    let lock_signal = lock_signal
-        .or_else(|| proposal_signal_from_gate(gate))
-        .or_else(|| gate.reasons.first().cloned())
-        .unwrap_or_else(|| "unknown_lock_signal".to_string());
+    let lock_signal = lock_signal.unwrap_or_else(|| "unknown_lock_signal".to_string());
     let evidence = gate.reasons.clone();
     let parent_receipt_hash =
         hash_serializable(gate).unwrap_or_else(|err| format!("hash-error:{err}"));
@@ -3880,10 +3981,7 @@ fn failure_receipts_from_parent(
     VaultEntryReceipt,
     FailureObservationReceipt,
 ) {
-    let lock_signal = lock_signal
-        .or_else(|| proposal_signal_from_gate(gate))
-        .or_else(|| evidence.first().cloned())
-        .unwrap_or_else(|| "unknown_lock_signal".to_string());
+    let lock_signal = lock_signal.unwrap_or_else(|| "unknown_lock_signal".to_string());
     let failure = FailureEvidenceReceipt {
         receipt_id: format!("failure-{}", gate.attempt_id),
         trace_id: gate.trace_id.clone(),
@@ -3921,10 +4019,6 @@ fn failure_receipts_from_parent(
         evidence,
     };
     (failure, vault, observation)
-}
-
-fn proposal_signal_from_gate(gate: &GateReceipt) -> Option<String> {
-    Some(format!("proposal:{}", gate.proposal_id))
 }
 
 fn find_record<'a>(
@@ -5073,21 +5167,21 @@ mod tests {
             &journal,
             "attempt-3",
             &intent,
-            &proposal("proposal-c", "README.md", "wrong-c"),
+            &proposal("proposal-c", "OTHER.md", "wrong-c"),
             Some("write:OTHER.md".to_string()),
         );
         let (_vault_d, handle_d) = append_attempt_failure_with_lock(
             &journal,
             "attempt-4",
             &intent,
-            &proposal("proposal-d", "README.md", "wrong-d"),
+            &proposal("proposal-d", "THIRD.md", "wrong-d"),
             Some("write:THIRD.md".to_string()),
         );
         let (_vault_e, handle_e) = append_attempt_failure_with_lock(
             &journal,
             "attempt-5",
             &intent,
-            &proposal("proposal-e", "README.md", "wrong-e"),
+            &proposal("proposal-e", "FOURTH.md", "wrong-e"),
             Some("write:FOURTH.md".to_string()),
         );
 
@@ -5105,6 +5199,96 @@ mod tests {
         assert!(!records
             .iter()
             .any(|record| record.record_kind == RuntimeRecordKind::PromotionApproval));
+    }
+
+    #[test]
+    fn unknown_lock_signal_cannot_create_promotion_candidate() {
+        let runtime = tempfile::tempdir().unwrap();
+        let intent = intent();
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
+        let proposals = [
+            MethodProposal::new("proposal-a", "external method", vec![], vec![]),
+            MethodProposal::new("proposal-b", "external method", vec![], vec![]),
+            MethodProposal::new("proposal-c", "external method", vec![], vec![]),
+        ];
+        let mut handles = Vec::new();
+        for proposal in &proposals {
+            let outcome = journal.run_ef_rescue_attempt(&intent, proposal).unwrap();
+            let EfRescueAttemptOutcome::UnresolvedFailure {
+                vault_record_id, ..
+            } = outcome
+            else {
+                panic!("empty proposal should stay as unresolved admissibility failure");
+            };
+            handles.push(journal.reissue_failure_handle(&vault_record_id).unwrap());
+        }
+
+        let err = journal
+            .record_isolated_promotion_candidate(
+                &handles,
+                "empty proposals share only unknown lock signal",
+            )
+            .unwrap_err();
+
+        assert!(err.contains("unknown lock signal"));
+        let records = journal.verify().unwrap();
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| record.record_kind == RuntimeRecordKind::VaultEntry)
+                .count(),
+            3
+        );
+        assert!(!records
+            .iter()
+            .any(|record| record.record_kind == RuntimeRecordKind::PromotionCandidate));
+    }
+
+    #[test]
+    fn isolated_triangulation_cannot_use_unknown_lock_signal() {
+        let runtime = tempfile::tempdir().unwrap();
+        let intent = intent();
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
+        let proposals = [
+            MethodProposal::new("proposal-a", "external method", vec![], vec![]),
+            MethodProposal::new("proposal-b", "external method", vec![], vec![]),
+            MethodProposal::new("proposal-c", "external method", vec![], vec![]),
+        ];
+        let mut vault_ids = Vec::new();
+        let mut handles = Vec::new();
+        for proposal in &proposals {
+            let outcome = journal.run_ef_rescue_attempt(&intent, proposal).unwrap();
+            let EfRescueAttemptOutcome::UnresolvedFailure {
+                vault_record_id, ..
+            } = outcome
+            else {
+                panic!("empty proposal should stay as unresolved admissibility failure");
+            };
+            handles.push(journal.reissue_failure_handle(&vault_record_id).unwrap());
+            vault_ids.push(vault_record_id);
+        }
+        let mut triangulation = triangulate_failures(&journal, &handles).unwrap();
+        assert_eq!(triangulation.lock_signal(), Some("unknown_lock_signal"));
+        triangulation.status = TriangulationStatus::Isolated;
+        triangulation.isolated_fault_condition =
+            Some("unknown lock should not become bounded law".to_string());
+        triangulation.reason = None;
+        triangulation.receipt_id = expected_triangulation_receipt_id(&triangulation).unwrap();
+
+        assert!(journal
+            .append_triangulation_receipt(vault_ids, &triangulation)
+            .unwrap_err()
+            .contains("isolated triangulation semantic binding mismatch"));
     }
 
     #[test]
@@ -5784,14 +5968,14 @@ mod tests {
             &journal,
             "attempt-2",
             &intent,
-            &proposal("proposal-b", "README.md", "wrong-b"),
+            &proposal("proposal-b", "OTHER.md", "wrong-b"),
             Some("write:OTHER.md".to_string()),
         );
         let (_vault_c, handle_c) = append_attempt_failure_with_lock(
             &journal,
             "attempt-3",
             &intent,
-            &proposal("proposal-c", "README.md", "wrong-c"),
+            &proposal("proposal-c", "THIRD.md", "wrong-c"),
             Some("write:THIRD.md".to_string()),
         );
         let contradictory = triangulate_failures(&journal, &[handle_b, handle_c]).unwrap();
@@ -6475,6 +6659,50 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_capability_spend_fails_journal_verification() {
+        let runtime = tempfile::tempdir().unwrap();
+        let intent = intent();
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
+        let (approval_record_id, _candidate_record_id, _candidate_hash) =
+            append_isolated_candidate_approval(&journal, &intent);
+        let promotion = journal
+            .reissue_promotion_capability(&approval_record_id)
+            .unwrap();
+        journal.promote_constraint(promotion).unwrap();
+        let records = journal.verify().unwrap();
+        let approval_record = find_record(&records, &approval_record_id).unwrap();
+        let approval: PromotionApprovalReceipt =
+            serde_json::from_value(approval_record.payload.clone()).unwrap();
+        let capability_id = format!("cap-promotion-{}", approval.receipt_id);
+        let duplicate_spend = CapabilitySpendReceipt {
+            receipt_id: format!("spend-{capability_id}"),
+            trace_id: "trace-1".to_string(),
+            request_id: "request-1".to_string(),
+            capability_id,
+            consumed_for: "promote-constraint".to_string(),
+            consumed_receipt_id: approval.receipt_id.clone(),
+            consumed_receipt_hash: approval_record.payload_hash.clone(),
+            consumed_record_id: approval_record.record_id.clone(),
+            consumed_record_hash: approval_record.record_hash.clone(),
+        };
+
+        assert!(journal
+            .append_record_internal(
+                RuntimeRecordKind::CapabilitySpend,
+                None,
+                vec![approval_record.record_id.clone()],
+                &duplicate_spend,
+            )
+            .unwrap_err()
+            .contains("duplicate capability spend"));
+    }
+
+    #[test]
     fn active_promoted_constraints_require_promotion_spend_lineage() {
         let runtime = tempfile::tempdir().unwrap();
         let intent = intent();
@@ -6650,8 +6878,11 @@ mod tests {
         let gate_record = journal
             .append_gate_receipt(proposal_record.record_id, &gate)
             .unwrap();
-        let (failure, mut vault, _observation) =
-            failure_receipts_from_gate(&gate, FailureClass::AdmissibilityRejected, None);
+        let (failure, mut vault, _observation) = failure_receipts_from_gate(
+            &gate,
+            FailureClass::AdmissibilityRejected,
+            Some("write:README.md".to_string()),
+        );
         let failure_record = journal
             .append_failure_evidence(gate_record.record_id, &failure)
             .unwrap();
@@ -6696,8 +6927,11 @@ mod tests {
         let gate_record = journal
             .append_gate_receipt(proposal_record.record_id, &gate)
             .unwrap();
-        let (failure, vault, mut observation) =
-            failure_receipts_from_gate(&gate, FailureClass::AdmissibilityRejected, None);
+        let (failure, vault, mut observation) = failure_receipts_from_gate(
+            &gate,
+            FailureClass::AdmissibilityRejected,
+            Some("write:README.md".to_string()),
+        );
         let failure_record = journal
             .append_failure_evidence(gate_record.record_id, &failure)
             .unwrap();
@@ -6799,6 +7033,78 @@ mod tests {
             record.record_kind == RuntimeRecordKind::GateReceipt
                 && record.record_id == gate_record_id
         }));
+    }
+
+    #[test]
+    fn execution_failure_evidence_must_be_host_typed() {
+        let runtime = tempfile::tempdir().unwrap();
+        let intent = intent();
+        let method = proposal("proposal-a", "README.md", "hello");
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
+        let allowed = journal.issue_allowed_attempt(&intent, &method).unwrap();
+        let gate = allowed.gate_receipt.clone();
+        let work_order = journal
+            .authorize_work_order(allowed, &intent, &method)
+            .unwrap();
+        let (failure, _vault, _observation) = failure_receipts_from_parent(
+            &gate,
+            work_order.receipt.receipt_id.clone(),
+            work_order.receipt_hash.clone(),
+            FailureClass::ExecutionFailed,
+            vec!["raw os error without host label".to_string()],
+            Some("write:README.md".to_string()),
+        );
+
+        assert!(journal
+            .append_failure_evidence(work_order.work_order_record_id, &failure)
+            .unwrap_err()
+            .contains("failure evidence does not match execution failure parent"));
+    }
+
+    #[test]
+    fn failure_lock_signals_must_match_gated_proposal() {
+        let workspace = tempfile::tempdir().unwrap();
+        let runtime = tempfile::tempdir().unwrap();
+        let intent = intent();
+        let method = proposal("proposal-a", "README.md", "wrong");
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(workspace.path()),
+        );
+        let allowed = journal.issue_allowed_attempt(&intent, &method).unwrap();
+        let gate = allowed.gate_receipt.clone();
+        let work_order = journal
+            .authorize_work_order(allowed, &intent, &method)
+            .unwrap();
+        let work_order_record_id = work_order.work_order_record_id.clone();
+        let execution = journal.execute_work_order(work_order).unwrap();
+        let execution_record = journal
+            .append_execution_receipt(work_order_record_id, &execution)
+            .unwrap();
+        let verification = verify_against_intent(&execution, &intent, &bounds(workspace.path()));
+        let verification_record = journal
+            .append_verification_receipt(execution_record.record_id, &verification)
+            .unwrap();
+        let (failure, _vault, _observation) = failure_receipts_from_parent(
+            &gate,
+            verification.receipt_id.clone(),
+            verification_record.payload_hash.clone(),
+            FailureClass::VerificationFailed,
+            verification.evidence.clone(),
+            Some("write:OTHER.md".to_string()),
+        );
+
+        assert!(journal
+            .append_failure_evidence(verification_record.record_id, &failure)
+            .unwrap_err()
+            .contains("failure lock signals do not match gated proposal"));
     }
 
     #[test]
@@ -6942,6 +7248,33 @@ mod tests {
         candidate
             .source_vault_record_ids
             .push("vault-forged".to_string());
+
+        assert!(journal
+            .append_promotion_candidate(tri_record.record_id.clone(), &candidate)
+            .unwrap_err()
+            .contains("promotion candidate semantic binding mismatch"));
+    }
+
+    #[test]
+    fn promotion_candidate_scope_must_equal_lock_signal() {
+        let runtime = tempfile::tempdir().unwrap();
+        let intent = intent();
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
+        let (approval_record_id, _candidate_record_id, _candidate_hash) =
+            append_isolated_candidate_approval(&journal, &intent);
+        let records = journal.verify().unwrap();
+        let approval_record = find_record(&records, &approval_record_id).unwrap();
+        let candidate_record =
+            find_record(&records, &approval_record.parent_record_ids[0]).unwrap();
+        let tri_record = find_record(&records, &candidate_record.parent_record_ids[0]).unwrap();
+        let mut candidate: ConstraintPromotionCandidateReceipt =
+            serde_json::from_value(candidate_record.payload.clone()).unwrap();
+        candidate.scope = "write:OTHER.md".to_string();
 
         assert!(journal
             .append_promotion_candidate(tri_record.record_id.clone(), &candidate)
@@ -7311,6 +7644,8 @@ mod tests {
         );
         assert_eq!(failure.parent_receipt_id, "work-order-attempt-1");
         assert_eq!(failure.parent_receipt_hash, work_order_parent.payload_hash);
+        assert_eq!(failure.evidence.len(), 1);
+        assert!(failure.evidence[0].starts_with("execution failed: "));
         assert!(records
             .iter()
             .any(|record| record.record_kind == RuntimeRecordKind::CapabilitySpend));
