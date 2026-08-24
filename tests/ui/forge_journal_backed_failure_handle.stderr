@@ -1,0 +1,25 @@
+warning: unreachable expression
+ --> tests/ui/forge_journal_backed_failure_handle.rs:4:19
+  |
+4 |       let _handle = JournalBackedFailureHandle {
+  |  ___________________^
+5 | |         vault_record_id: "vault-record".to_string(),
+6 | |         vault_record_hash: "vault-hash".to_string(),
+7 | |         receipt: todo!(),
+  | |                  ------- any code following this expression is unreachable
+8 | |     };
+  | |_____^ unreachable expression
+  |
+  = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
+
+error[E0451]: fields `vault_record_id`, `vault_record_hash` and `receipt` of struct `JournalBackedFailureHandle` are private
+ --> tests/ui/forge_journal_backed_failure_handle.rs:5:9
+  |
+4 |     let _handle = JournalBackedFailureHandle {
+  |                   -------------------------- in this type
+5 |         vault_record_id: "vault-record".to_string(),
+  |         ^^^^^^^^^^^^^^^ private field
+6 |         vault_record_hash: "vault-hash".to_string(),
+  |         ^^^^^^^^^^^^^^^^^ private field
+7 |         receipt: todo!(),
+  |         ^^^^^^^ private field

@@ -2008,6 +2008,23 @@ impl RuntimeJournal {
         })
     }
 
+    pub fn record_triangulation(
+        &self,
+        handles: &[JournalBackedFailureHandle],
+    ) -> Result<RuntimeRecordEnvelope, String> {
+        if handles.len() < 2 {
+            return Err("persisted triangulation requires at least two failures".to_string());
+        }
+        let receipt = triangulate_failures(self, handles)?;
+        let parent_vault_record_ids = receipt.source_vault_record_ids.clone();
+        self.append_record_internal(
+            RuntimeRecordKind::TriangulationReceipt,
+            None,
+            parent_vault_record_ids,
+            &receipt,
+        )
+    }
+
     fn append_external_attempt_gate(
         &self,
         attempt_id: &str,
@@ -4252,6 +4269,35 @@ mod tests {
     }
 
     #[test]
+    fn single_failure_cannot_be_persisted_as_triangulation() {
+        let runtime = tempfile::tempdir().unwrap();
+        let intent = intent();
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
+        let (_vault_id, handle) = append_attempt_failure(
+            &journal,
+            "attempt-1",
+            &intent,
+            &proposal("proposal-a", "README.md", "wrong"),
+        );
+
+        let err = journal.record_triangulation(&[handle]).unwrap_err();
+
+        assert!(err.contains("at least two failures"));
+        let records = journal.verify().unwrap();
+        assert!(!records
+            .iter()
+            .any(|record| record.record_kind == RuntimeRecordKind::TriangulationReceipt));
+        assert!(!records
+            .iter()
+            .any(|record| record.record_kind == RuntimeRecordKind::PromotionCandidate));
+    }
+
+    #[test]
     fn two_journal_backed_failures_keep_triangulation_unresolved() {
         let runtime = tempfile::tempdir().unwrap();
         let intent = intent();
@@ -4277,6 +4323,56 @@ mod tests {
         assert_eq!(tri.status, TriangulationStatus::Unresolved);
         assert_eq!(tri.lock_signal, Some("write:README.md".to_string()));
         assert!(candidate_from_triangulation(&tri, "tri-hash").is_err());
+    }
+
+    #[test]
+    fn record_triangulation_persists_unresolved_receipt_without_candidate() {
+        let runtime = tempfile::tempdir().unwrap();
+        let intent = intent();
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
+        let (vault_a, handle_a) = append_attempt_failure(
+            &journal,
+            "attempt-1",
+            &intent,
+            &proposal("proposal-a", "README.md", "wrong-a"),
+        );
+        let (vault_b, handle_b) = append_attempt_failure(
+            &journal,
+            "attempt-2",
+            &intent,
+            &proposal("proposal-b", "README.md", "wrong-b"),
+        );
+
+        let triangulation_record = journal.record_triangulation(&[handle_a, handle_b]).unwrap();
+
+        assert_eq!(
+            triangulation_record.record_kind(),
+            RuntimeRecordKind::TriangulationReceipt
+        );
+        assert_eq!(
+            triangulation_record.parent_record_ids(),
+            &[vault_a.clone(), vault_b.clone()]
+        );
+        let triangulation: TriangulationReceipt =
+            serde_json::from_value(triangulation_record.payload().clone()).unwrap();
+        assert_eq!(triangulation.status, TriangulationStatus::Unresolved);
+        assert_eq!(
+            triangulation.source_vault_record_ids(),
+            &[vault_a.clone(), vault_b.clone()]
+        );
+        assert_eq!(triangulation.lock_signal(), Some("write:README.md"));
+        let records = journal.verify().unwrap();
+        assert!(!records
+            .iter()
+            .any(|record| record.record_kind == RuntimeRecordKind::PromotionCandidate));
+        assert!(!records
+            .iter()
+            .any(|record| record.record_kind == RuntimeRecordKind::PromotionApproval));
     }
 
     #[test]
@@ -5874,6 +5970,7 @@ mod tests {
         tests.compile_fail("tests/ui/forge_execution_receipt_literal.rs");
         tests.compile_fail("tests/ui/forge_failure_receipts.rs");
         tests.compile_fail("tests/ui/forge_failure_receipts_literal.rs");
+        tests.compile_fail("tests/ui/forge_journal_backed_failure_handle.rs");
         tests.compile_fail("tests/ui/forge_gate_receipt.rs");
         tests.compile_fail("tests/ui/forge_gate_receipt_literal.rs");
         tests.compile_fail("tests/ui/forge_host_bounds.rs");

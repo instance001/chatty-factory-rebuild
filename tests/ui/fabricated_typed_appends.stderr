@@ -129,7 +129,16 @@ error[E0599]: no method named `append_triangulation_receipt` found for struct `R
   --> tests/ui/fabricated_typed_appends.rs:11:21
    |
 11 |     let _ = journal.append_triangulation_receipt(vec![], todo!());
-   |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method not found in `RuntimeJournal`
+   |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: there is a method `record_triangulation` with a similar name, but with different arguments
+  --> src/lib.rs
+   |
+   | /     pub fn record_triangulation(
+   | |         &self,
+   | |         handles: &[JournalBackedFailureHandle],
+   | |     ) -> Result<RuntimeRecordEnvelope, String> {
+   | |______________________________________________^
 
 warning: unreachable call
   --> tests/ui/fabricated_typed_appends.rs:11:21
