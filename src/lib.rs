@@ -5737,6 +5737,62 @@ mod tests {
     }
 
     #[test]
+    fn ef_rescue_success_leaves_prior_vault_evidence_in_situ() {
+        let workspace = tempfile::tempdir().unwrap();
+        let runtime = tempfile::tempdir().unwrap();
+        let intent = intent();
+        let failed = proposal("proposal-fails", "README.md", "wrong");
+        let succeeds = proposal("proposal-succeeds", "README.md", "hello");
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(workspace.path()),
+        );
+
+        let first = journal.run_ef_rescue_attempt(&intent, &failed).unwrap();
+        let second = journal.run_ef_rescue_attempt(&intent, &succeeds).unwrap();
+
+        assert!(matches!(
+            first,
+            EfRescueAttemptOutcome::UnresolvedFailure {
+                failure_class: FailureClass::VerificationFailed,
+                ..
+            }
+        ));
+        assert!(matches!(second, EfRescueAttemptOutcome::Artifact { .. }));
+        let records = journal.verify().unwrap();
+        let kinds = records
+            .iter()
+            .map(|record| record.record_kind)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            kinds
+                .iter()
+                .filter(|kind| **kind == RuntimeRecordKind::FailureEvidence)
+                .count(),
+            1
+        );
+        assert_eq!(
+            kinds
+                .iter()
+                .filter(|kind| **kind == RuntimeRecordKind::VaultEntry)
+                .count(),
+            1
+        );
+        assert_eq!(
+            kinds
+                .iter()
+                .filter(|kind| **kind == RuntimeRecordKind::FailureObservation)
+                .count(),
+            1
+        );
+        assert!(!kinds.contains(&RuntimeRecordKind::TriangulationReceipt));
+        assert!(!kinds.contains(&RuntimeRecordKind::PromotionCandidate));
+        assert!(!kinds.contains(&RuntimeRecordKind::PromotionApproval));
+    }
+
+    #[test]
     fn ef_rescue_attempt_uses_host_issued_sequential_attempt_ids() {
         let workspace = tempfile::tempdir().unwrap();
         let runtime = tempfile::tempdir().unwrap();
