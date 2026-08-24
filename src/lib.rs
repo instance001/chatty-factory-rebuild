@@ -4756,6 +4756,76 @@ mod tests {
     }
 
     #[test]
+    fn public_candidate_approval_and_promotion_path_activates_constraint_once_spent() {
+        let runtime = tempfile::tempdir().unwrap();
+        let intent = intent();
+        let method = proposal("proposal-blocked-after-promotion", "README.md", "hello");
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
+        let (_vault_a, handle_a) = append_attempt_failure(
+            &journal,
+            "attempt-1",
+            &intent,
+            &proposal("proposal-a", "README.md", "wrong-a"),
+        );
+        let (_vault_b, handle_b) = append_attempt_failure(
+            &journal,
+            "attempt-2",
+            &intent,
+            &proposal("proposal-b", "README.md", "wrong-b"),
+        );
+        let (_vault_c, handle_c) = append_attempt_failure(
+            &journal,
+            "attempt-3",
+            &intent,
+            &proposal("proposal-c", "README.md", "wrong-c"),
+        );
+        let (_triangulation_record, candidate_record) = journal
+            .record_isolated_promotion_candidate(
+                &[handle_a, handle_b, handle_c],
+                "exact write to README.md repeatedly fails acceptance despite materially different attempts",
+            )
+            .unwrap();
+        let approval_record = journal
+            .approve_promotion_candidate(
+                candidate_record.record_id(),
+                external_operator_assertion("operator-approval"),
+            )
+            .unwrap();
+
+        assert!(journal.issue_allowed_attempt(&intent, &method).is_ok());
+        let promotion = journal
+            .reissue_promotion_capability(approval_record.record_id())
+            .unwrap();
+        let promoted = journal.promote_constraint(promotion).unwrap();
+        let active = journal.active_promoted_constraints().unwrap();
+        assert_eq!(active, vec![promoted.clone()]);
+
+        let reloaded = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
+        assert_eq!(
+            reloaded.active_promoted_constraints().unwrap(),
+            vec![promoted.clone()]
+        );
+        let blocked = reloaded
+            .issue_allowed_attempt(&intent, &method)
+            .unwrap_err();
+        assert!(!blocked.admissible());
+        assert_eq!(
+            blocked.blocked_by_constraint_ids(),
+            &[promoted.constraint_id().to_string()]
+        );
+    }
+
+    #[test]
     fn approve_promotion_candidate_rejects_non_candidate_or_forged_assertion() {
         let runtime = tempfile::tempdir().unwrap();
         let intent = intent();
@@ -6026,6 +6096,84 @@ mod tests {
         assert!(kinds.contains(&RuntimeRecordKind::VaultEntry));
         assert!(kinds.contains(&RuntimeRecordKind::FailureObservation));
         assert!(kinds.contains(&RuntimeRecordKind::CapabilitySpend));
+        assert!(!kinds.contains(&RuntimeRecordKind::WorkOrderReceipt));
+        assert!(!kinds.contains(&RuntimeRecordKind::ExecutionReceipt));
+        assert!(!workspace.path().join("README.md").exists());
+    }
+
+    #[test]
+    fn ef_rescue_attempt_publicly_promoted_constraint_blocks_before_execution() {
+        let workspace = tempfile::tempdir().unwrap();
+        let runtime = tempfile::tempdir().unwrap();
+        let intent = intent();
+        let method = proposal("proposal-blocked-by-public-law", "README.md", "hello");
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
+        let (_vault_a, handle_a) = append_attempt_failure(
+            &journal,
+            "attempt-1",
+            &intent,
+            &proposal("proposal-a", "README.md", "wrong-a"),
+        );
+        let (_vault_b, handle_b) = append_attempt_failure(
+            &journal,
+            "attempt-2",
+            &intent,
+            &proposal("proposal-b", "README.md", "wrong-b"),
+        );
+        let (_vault_c, handle_c) = append_attempt_failure(
+            &journal,
+            "attempt-3",
+            &intent,
+            &proposal("proposal-c", "README.md", "wrong-c"),
+        );
+        let (_triangulation_record, candidate_record) = journal
+            .record_isolated_promotion_candidate(
+                &[handle_a, handle_b, handle_c],
+                "exact write to README.md repeatedly fails acceptance despite materially different attempts",
+            )
+            .unwrap();
+        let approval_record = journal
+            .approve_promotion_candidate(
+                candidate_record.record_id(),
+                external_operator_assertion("operator-approval"),
+            )
+            .unwrap();
+        let promotion = journal
+            .reissue_promotion_capability(approval_record.record_id())
+            .unwrap();
+        let promoted = journal.promote_constraint(promotion).unwrap();
+
+        let outcome = journal.run_ef_rescue_attempt(&intent, &method).unwrap();
+
+        let EfRescueAttemptOutcome::UnresolvedFailure {
+            failure_class,
+            gate,
+            ..
+        } = outcome
+        else {
+            panic!("active promoted constraint should block rescue before execution");
+        };
+        assert_eq!(failure_class, FailureClass::AdmissibilityRejected);
+        assert_eq!(
+            gate.blocked_by_constraint_ids(),
+            &[promoted.constraint_id().to_string()]
+        );
+        let records = journal.verify().unwrap();
+        let kinds = records
+            .iter()
+            .map(|record| record.record_kind)
+            .collect::<Vec<_>>();
+        assert!(kinds.contains(&RuntimeRecordKind::PromotionCandidate));
+        assert!(kinds.contains(&RuntimeRecordKind::PromotionApproval));
+        assert!(kinds.contains(&RuntimeRecordKind::CapabilitySpend));
+        assert!(kinds.contains(&RuntimeRecordKind::FailureEvidence));
+        assert!(kinds.contains(&RuntimeRecordKind::VaultEntry));
+        assert!(kinds.contains(&RuntimeRecordKind::FailureObservation));
         assert!(!kinds.contains(&RuntimeRecordKind::WorkOrderReceipt));
         assert!(!kinds.contains(&RuntimeRecordKind::ExecutionReceipt));
         assert!(!workspace.path().join("README.md").exists());
