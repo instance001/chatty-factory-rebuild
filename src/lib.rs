@@ -4826,6 +4826,73 @@ mod tests {
     }
 
     #[test]
+    fn public_promoted_constraint_does_not_block_other_scope() {
+        let workspace = tempfile::tempdir().unwrap();
+        let runtime = tempfile::tempdir().unwrap();
+        let intent = intent();
+        let other_scope = proposal("proposal-other-scope", "OTHER.md", "hello");
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(workspace.path()),
+        );
+        let (_vault_a, handle_a) = append_attempt_failure(
+            &journal,
+            "attempt-1",
+            &intent,
+            &proposal("proposal-a", "README.md", "wrong-a"),
+        );
+        let (_vault_b, handle_b) = append_attempt_failure(
+            &journal,
+            "attempt-2",
+            &intent,
+            &proposal("proposal-b", "README.md", "wrong-b"),
+        );
+        let (_vault_c, handle_c) = append_attempt_failure(
+            &journal,
+            "attempt-3",
+            &intent,
+            &proposal("proposal-c", "README.md", "wrong-c"),
+        );
+        let (_triangulation_record, candidate_record) = journal
+            .record_isolated_promotion_candidate(
+                &[handle_a, handle_b, handle_c],
+                "exact write to README.md repeatedly fails acceptance despite materially different attempts",
+            )
+            .unwrap();
+        let approval_record = journal
+            .approve_promotion_candidate(
+                candidate_record.record_id(),
+                external_operator_assertion("operator-approval"),
+            )
+            .unwrap();
+        let promotion = journal
+            .reissue_promotion_capability(approval_record.record_id())
+            .unwrap();
+        let promoted = journal.promote_constraint(promotion).unwrap();
+        assert_eq!(promoted.lock_signal(), "write:README.md");
+
+        let outcome = journal
+            .run_ef_rescue_attempt(&intent, &other_scope)
+            .unwrap();
+
+        let EfRescueAttemptOutcome::UnresolvedFailure { failure_class, .. } = outcome else {
+            panic!("other-scope proposal should reach verification rather than gate rejection");
+        };
+        assert_eq!(failure_class, FailureClass::VerificationFailed);
+        let records = journal.verify().unwrap();
+        assert!(records
+            .iter()
+            .any(|record| record.record_kind == RuntimeRecordKind::WorkOrderReceipt));
+        assert!(records
+            .iter()
+            .any(|record| record.record_kind == RuntimeRecordKind::ExecutionReceipt));
+        assert!(workspace.path().join("OTHER.md").exists());
+        assert!(!workspace.path().join("README.md").exists());
+    }
+
+    #[test]
     fn approve_promotion_candidate_rejects_non_candidate_or_forged_assertion() {
         let runtime = tempfile::tempdir().unwrap();
         let intent = intent();
