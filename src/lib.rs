@@ -1347,7 +1347,7 @@ impl RuntimeJournal {
         }) {
             return Err("confirmed intent receipt already exists in journal".to_string());
         }
-        let request_record = self.append_request(&intent.receipt.exact_request)?;
+        let request_record = self.ensure_request_record(&intent.receipt.exact_request)?;
         self.append_confirmed_intent_receipt(request_record.record_id, &intent)?;
         Ok(intent)
     }
@@ -1357,6 +1357,27 @@ impl RuntimeJournal {
             return Err("request id does not match journal".to_string());
         }
         self.append_record_internal(RuntimeRecordKind::Request, None, vec![], request)
+    }
+
+    fn ensure_request_record(
+        &self,
+        request: &ExactRequest,
+    ) -> Result<RuntimeRecordEnvelope, String> {
+        if request.request_id != self.request_id {
+            return Err("request id does not match journal".to_string());
+        }
+        request.validate_self()?;
+        for record in self.verify()? {
+            if record.record_kind != RuntimeRecordKind::Request {
+                continue;
+            }
+            let existing: ExactRequest = decode_payload(&record)?;
+            if existing != *request {
+                return Err("journal request record conflicts with exact request".to_string());
+            }
+            return Ok(record);
+        }
+        self.append_request(request)
     }
 
     fn append_confirmed_intent_receipt(
@@ -1393,7 +1414,7 @@ impl RuntimeJournal {
             return Ok(record);
         }
 
-        let request_record = self.append_request(&intent.receipt().exact_request)?;
+        let request_record = self.ensure_request_record(&intent.receipt().exact_request)?;
         self.append_confirmed_intent_receipt(request_record.record_id, intent)
     }
 
@@ -1838,14 +1859,8 @@ impl RuntimeJournal {
         externally_supplied_proposal: &MethodProposal,
     ) -> Result<EfRescueAttemptOutcome, String> {
         let attempt_id = self.next_attempt_id()?;
-        let promoted_constraints = self.active_promoted_constraints()?;
-        let (gate_record, gate, allowed) = self.append_external_attempt_gate(
-            &attempt_id,
-            intent,
-            externally_supplied_proposal,
-            &self.host_bounds,
-            &promoted_constraints,
-        )?;
+        let (gate_record, gate, allowed) =
+            self.append_external_attempt_gate(&attempt_id, intent, externally_supplied_proposal)?;
         let Some(allowed) = allowed else {
             return self.record_attempt_failure(
                 gate_record.record_id.clone(),
@@ -2125,8 +2140,6 @@ impl RuntimeJournal {
         attempt_id: &str,
         intent: &ConfirmedIntentCapability,
         proposal: &MethodProposal,
-        bounds: &HostBounds,
-        promoted_constraints: &[PromotedConstraint],
     ) -> Result<
         (
             RuntimeRecordEnvelope,
@@ -2135,13 +2148,14 @@ impl RuntimeJournal {
         ),
         String,
     > {
+        let promoted_constraints = self.active_promoted_constraints()?;
         let gate = gate_attempt_receipt(
             &self.trace_id,
             attempt_id,
             intent,
             proposal,
-            bounds,
-            promoted_constraints,
+            &self.host_bounds,
+            &promoted_constraints,
         );
         let intent_record = self.ensure_confirmed_intent_record(intent)?;
         let proposal_record =
@@ -2274,6 +2288,7 @@ impl RuntimeJournal {
             .map(|record| (record.record_id.clone(), record.clone()))
             .collect::<BTreeMap<_, _>>();
         verify_existing_record_topology(&envelope, &by_id, &self.host_bounds)?;
+        reject_duplicate_confirmed_intent_receipt(&envelope, existing.iter())?;
         reject_duplicate_capability_spend(&envelope, existing.iter())?;
         let json = serde_json::to_string(&envelope)
             .map_err(|err| format!("could not serialize runtime record: {err}"))?;
@@ -2411,6 +2426,7 @@ fn verify_records(
 ) -> Result<(), String> {
     let mut record_ids = BTreeSet::new();
     let mut sequences = BTreeSet::new();
+    let mut confirmed_intent_receipts = BTreeSet::new();
     let mut by_id = BTreeMap::new();
     let mut spent_capabilities = BTreeSet::new();
     let mut previous_hash = None;
@@ -2474,6 +2490,12 @@ fn verify_records(
             return Err(format!("record '{}' hash was modified", record.record_id));
         }
         verify_existing_record_topology(record, &by_id, host_bounds)?;
+        if record.record_kind == RuntimeRecordKind::ConfirmedIntentReceipt {
+            let receipt: ConfirmedIntentReceipt = decode_payload(record)?;
+            if !confirmed_intent_receipts.insert(receipt.receipt_id) {
+                return Err("duplicate confirmed intent receipt".to_string());
+            }
+        }
         if record.record_kind == RuntimeRecordKind::CapabilitySpend {
             let spend = capability_spend(record)?;
             if !spent_capabilities.insert(spend.capability_id) {
@@ -2482,6 +2504,25 @@ fn verify_records(
         }
         previous_hash = Some(record.record_hash.clone());
         by_id.insert(record.record_id.clone(), record.clone());
+    }
+    Ok(())
+}
+
+fn reject_duplicate_confirmed_intent_receipt<'a>(
+    record: &RuntimeRecordEnvelope,
+    existing: impl Iterator<Item = &'a RuntimeRecordEnvelope>,
+) -> Result<(), String> {
+    if record.record_kind != RuntimeRecordKind::ConfirmedIntentReceipt {
+        return Ok(());
+    }
+    let receipt: ConfirmedIntentReceipt = decode_payload(record)?;
+    for existing_record in existing {
+        if existing_record.record_kind == RuntimeRecordKind::ConfirmedIntentReceipt {
+            let existing_receipt: ConfirmedIntentReceipt = decode_payload(existing_record)?;
+            if existing_receipt.receipt_id == receipt.receipt_id {
+                return Err("duplicate confirmed intent receipt".to_string());
+            }
+        }
     }
     Ok(())
 }
@@ -2514,6 +2555,13 @@ fn verify_existing_record_topology(
     host_bounds: &HostBounds,
 ) -> Result<(), String> {
     verify_parent_shape(record.record_kind, &record.parent_record_ids, by_id)?;
+    if record.record_kind == RuntimeRecordKind::Request
+        && by_id
+            .values()
+            .any(|existing| existing.record_kind == RuntimeRecordKind::Request)
+    {
+        return Err("journal already has a request record".to_string());
+    }
     for parent_id in &record.parent_record_ids {
         let parent = by_id.get(parent_id).ok_or_else(|| {
             format!(
@@ -4173,16 +4221,7 @@ mod tests {
         method: &MethodProposal,
         lock_signal: Option<String>,
     ) -> (String, JournalBackedFailureHandle) {
-        let request = if journal.verify().unwrap_or_default().is_empty() {
-            journal
-                .append_request(&intent.receipt().exact_request)
-                .unwrap()
-        } else {
-            journal.verify().unwrap()[0].clone()
-        };
-        let confirmed = journal
-            .append_confirmed_intent_receipt(request.record_id, intent)
-            .unwrap();
+        let confirmed = journal.ensure_confirmed_intent_record(intent).unwrap();
         let proposal_record = journal
             .append_proposal(attempt_id, confirmed.record_id, method)
             .unwrap();
@@ -4191,7 +4230,7 @@ mod tests {
             attempt_id,
             intent,
             method,
-            &bounds(tempfile::tempdir().unwrap().path()),
+            &journal.host_bounds,
             &[],
         );
         let gate_record = journal
@@ -4214,43 +4253,16 @@ mod tests {
         let work_order_record = journal
             .append_work_order_receipt_payload(&gate_record.record_id, &work_order)
             .unwrap();
-        let execution = ExecutionReceipt {
-            receipt_id: format!("execution-{attempt_id}"),
-            trace_id: gate.trace_id.clone(),
-            request_id: gate.request_id.clone(),
-            attempt_id: gate.attempt_id.clone(),
-            work_order_receipt_id: work_order.receipt_id.clone(),
-            work_order_receipt_hash: work_order_record.payload_hash.clone(),
-            executed_steps: work_order.steps.len(),
-            written_files: written_files_from_work_order(&work_order),
-        };
-        let execution_record = journal
-            .append_execution_receipt(work_order_record.record_id, &execution)
-            .unwrap();
-        let verification = VerificationReceipt {
-            receipt_id: format!("verification-{attempt_id}"),
-            trace_id: gate.trace_id.clone(),
-            request_id: gate.request_id.clone(),
-            attempt_id: gate.attempt_id.clone(),
-            execution_receipt_id: execution.receipt_id.clone(),
-            execution_receipt_hash: execution_record.payload_hash.clone(),
-            success: false,
-            checked_claim_ids: vec!["accept-1".to_string()],
-            evidence: vec!["claim 'accept-1' failed: file_contains:README.md::hello".to_string()],
-        };
-        let verification_record = journal
-            .append_verification_receipt(execution_record.record_id, &verification)
-            .unwrap();
         let (failure, vault, observation) = failure_receipts_from_parent(
             &gate,
-            verification.receipt_id.clone(),
-            verification_record.payload_hash.clone(),
-            FailureClass::VerificationFailed,
-            verification.evidence.clone(),
+            work_order.receipt_id.clone(),
+            work_order_record.payload_hash.clone(),
+            FailureClass::ExecutionFailed,
+            execution_failure_evidence("test fixture execution failure"),
             lock_signal,
         );
         let failure_record = journal
-            .append_failure_evidence(verification_record.record_id, &failure)
+            .append_failure_evidence(work_order_record.record_id, &failure)
             .unwrap();
         let vault_record = journal
             .append_vault_entry(failure_record.record_id, &vault)
@@ -6151,6 +6163,165 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    #[test]
+    fn confirmed_intents_reuse_one_exact_request_record() {
+        let runtime = tempfile::tempdir().unwrap();
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
+
+        journal
+            .confirm_intent(
+                draft("Create README with hello", "file_contains:README.md::hello"),
+                external_operator_assertion("operator-confirmation-a"),
+            )
+            .unwrap();
+        journal
+            .confirm_intent(
+                draft("Create README with hello", "file_contains:README.md::hello"),
+                external_operator_assertion("operator-confirmation-b"),
+            )
+            .unwrap();
+
+        let records = journal.verify().unwrap();
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| record.record_kind == RuntimeRecordKind::Request)
+                .count(),
+            1
+        );
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| record.record_kind == RuntimeRecordKind::ConfirmedIntentReceipt)
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn conflicting_exact_request_is_rejected_without_append() {
+        let runtime = tempfile::tempdir().unwrap();
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
+
+        journal
+            .confirm_intent(
+                draft("Create README with hello", "file_contains:README.md::hello"),
+                external_operator_assertion("operator-confirmation"),
+            )
+            .unwrap();
+        let before = journal.verify().unwrap().len();
+
+        let err = journal
+            .confirm_intent(
+                draft("Different request text", "file_contains:README.md::hello"),
+                external_operator_assertion("operator-confirmation-2"),
+            )
+            .unwrap_err();
+
+        assert!(err.contains("journal request record conflicts with exact request"));
+        assert_eq!(journal.verify().unwrap().len(), before);
+    }
+
+    #[test]
+    fn duplicate_confirmed_intent_receipt_is_rejected_without_append() {
+        let runtime = tempfile::tempdir().unwrap();
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
+        let request_draft = draft("Create README with hello", "file_contains:README.md::hello");
+        let assertion = external_operator_assertion("operator-confirmation");
+
+        journal
+            .confirm_intent(request_draft.clone(), assertion.clone())
+            .unwrap();
+        let before = journal.verify().unwrap().len();
+        let err = journal
+            .confirm_intent(request_draft, assertion)
+            .unwrap_err();
+
+        assert!(err.contains("confirmed intent receipt already exists"));
+        assert_eq!(journal.verify().unwrap().len(), before);
+    }
+
+    #[test]
+    fn persisted_second_request_root_fails_journal_verification() {
+        let runtime = tempfile::tempdir().unwrap();
+        let intent = intent();
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
+        journal
+            .append_request(&intent.receipt().exact_request)
+            .unwrap();
+        let mut records = journal.verify().unwrap();
+        let mut duplicate_request = records[0].clone();
+        duplicate_request.sequence_number = 1;
+        duplicate_request.record_id = expected_record_id(RuntimeRecordKind::Request, 1);
+        duplicate_request.previous_record_hash = Some(records[0].record_hash.clone());
+        rehash_record(&mut duplicate_request);
+        records.push(duplicate_request);
+        write_records_and_head(runtime.path(), &records);
+
+        assert!(journal
+            .verify()
+            .unwrap_err()
+            .contains("journal already has a request record"));
+    }
+
+    #[test]
+    fn persisted_duplicate_confirmed_intent_receipt_fails_journal_verification() {
+        let runtime = tempfile::tempdir().unwrap();
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
+        let request_draft = draft("Create README with hello", "file_contains:README.md::hello");
+        let assertion = external_operator_assertion("operator-confirmation");
+        journal
+            .confirm_intent(request_draft.clone(), assertion.clone())
+            .unwrap();
+
+        let mut records = journal.verify().unwrap();
+        let confirmed = records
+            .iter()
+            .find(|record| record.record_kind == RuntimeRecordKind::ConfirmedIntentReceipt)
+            .unwrap()
+            .clone();
+        let mut duplicate = confirmed;
+        duplicate.sequence_number = records.len() as u64;
+        duplicate.record_id = expected_record_id(
+            RuntimeRecordKind::ConfirmedIntentReceipt,
+            duplicate.sequence_number,
+        );
+        duplicate.previous_record_hash = records.last().map(|record| record.record_hash.clone());
+        rehash_record(&mut duplicate);
+        records.push(duplicate);
+        write_records_and_head(runtime.path(), &records);
+
+        assert!(journal
+            .verify()
+            .unwrap_err()
+            .contains("duplicate confirmed intent receipt"));
     }
 
     #[test]
