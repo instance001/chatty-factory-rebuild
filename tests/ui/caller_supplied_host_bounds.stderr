@@ -9,21 +9,23 @@ warning: unreachable expression
   = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
   = note: this warning originates in the macro `todo` (in Nightly builds, run with -Z macro-backtrace for more info)
 
-error[E0061]: this method takes 3 arguments but 4 arguments were supplied
+error[E0061]: this method takes 2 arguments but 4 arguments were supplied
  --> tests/ui/caller_supplied_host_bounds.rs:7:21
   |
 7 |     let _ = journal.issue_allowed_attempt(todo!(), todo!(), &bounds, &[]);
-  |                     ^^^^^^^^^^^^^^^^^^^^^                   ------- unexpected argument #3 of type `&HostBounds`
+  |                     ^^^^^^^^^^^^^^^^^^^^^                   -------  --- unexpected argument #4 of type `&[_; 0]`
+  |                                                             |
+  |                                                             unexpected argument #3 of type `&HostBounds`
   |
 note: method defined here
  --> src/lib.rs
   |
   |     pub fn issue_allowed_attempt(
   |            ^^^^^^^^^^^^^^^^^^^^^
-help: remove the extra argument
+help: remove the extra arguments
   |
 7 -     let _ = journal.issue_allowed_attempt(todo!(), todo!(), &bounds, &[]);
-7 +     let _ = journal.issue_allowed_attempt(todo!(), todo!(), &[]);
+7 +     let _ = journal.issue_allowed_attempt(todo!(), todo!());
   |
 
 warning: unreachable expression
@@ -61,19 +63,21 @@ warning: unreachable expression
   |
   = note: this warning originates in the macro `todo` (in Nightly builds, run with -Z macro-backtrace for more info)
 
-error[E0061]: this method takes 3 arguments but 4 arguments were supplied
+error[E0061]: this method takes 2 arguments but 4 arguments were supplied
  --> tests/ui/caller_supplied_host_bounds.rs:9:21
   |
 9 |     let _ = journal.run_ef_rescue_attempt(todo!(), todo!(), &bounds, &[]);
-  |                     ^^^^^^^^^^^^^^^^^^^^^                   ------- unexpected argument #3 of type `&HostBounds`
+  |                     ^^^^^^^^^^^^^^^^^^^^^                   -------  --- unexpected argument #4 of type `&[_; 0]`
+  |                                                             |
+  |                                                             unexpected argument #3 of type `&HostBounds`
   |
 note: method defined here
  --> src/lib.rs
   |
   |     pub fn run_ef_rescue_attempt(
   |            ^^^^^^^^^^^^^^^^^^^^^
-help: remove the extra argument
+help: remove the extra arguments
   |
 9 -     let _ = journal.run_ef_rescue_attempt(todo!(), todo!(), &bounds, &[]);
-9 +     let _ = journal.run_ef_rescue_attempt(todo!(), todo!(), &[]);
+9 +     let _ = journal.run_ef_rescue_attempt(todo!(), todo!());
   |

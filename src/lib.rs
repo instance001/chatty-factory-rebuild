@@ -1557,7 +1557,6 @@ impl RuntimeJournal {
         &self,
         intent: &ConfirmedIntentCapability,
         proposal: &MethodProposal,
-        promoted_constraints: &[PromotedConstraint],
     ) -> Result<AllowedAttemptCapability, GateReceipt> {
         let attempt_id = self.next_attempt_id().map_err(|err| GateReceipt {
             receipt_id: "gate-unissued".to_string(),
@@ -1574,13 +1573,30 @@ impl RuntimeJournal {
             reasons: vec![err],
             blocked_by_constraint_ids: vec![],
         })?;
+        let promoted_constraints =
+            self.active_promoted_constraints()
+                .map_err(|err| GateReceipt {
+                    receipt_id: format!("gate-{attempt_id}"),
+                    trace_id: self.trace_id.clone(),
+                    request_id: intent.receipt.exact_request.request_id.clone(),
+                    request_hash: intent.request_hash().to_string(),
+                    confirmed_intent_receipt_id: intent.receipt.receipt_id.clone(),
+                    confirmed_intent_receipt_hash: intent.receipt_hash.clone(),
+                    attempt_id: attempt_id.clone(),
+                    proposal_id: proposal.proposal_id().to_string(),
+                    proposal_hash: hash_serializable(proposal)
+                        .unwrap_or_else(|hash_err| format!("hash-error:{hash_err}")),
+                    admissible: false,
+                    reasons: vec![err],
+                    blocked_by_constraint_ids: vec![],
+                })?;
         let allowed = issue_allowed_attempt_internal(
             &self.trace_id,
             attempt_id,
             intent,
             proposal,
             &self.host_bounds,
-            promoted_constraints,
+            &promoted_constraints,
         )?;
         self.ensure_attempt_id_unused(&allowed.gate_receipt.attempt_id)
             .map_err(|err| blocked_gate_from_allowed(&allowed, err))?;
@@ -1776,30 +1792,68 @@ impl RuntimeJournal {
             vec![promotion.approval_record_id.clone()],
             &spend,
         )?;
-        Ok(PromotedConstraint {
-            constraint_id: promotion.constraint_id(),
-            trace_id: promotion.candidate_receipt.trace_id,
-            request_id: promotion.candidate_receipt.request_id,
-            scope: promotion.candidate_receipt.scope,
-            lock_signal: promotion.candidate_receipt.lock_signal,
-            promotion_approval_receipt_id: promotion.approval_receipt.receipt_id,
-            promotion_approval_receipt_hash: promotion.approval_receipt_hash,
-        })
+        Ok(promoted_constraint_from_candidate_approval(
+            &promotion.candidate_receipt,
+            &promotion.approval_receipt,
+            &promotion.approval_receipt_hash,
+        ))
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn active_promoted_constraints(&self) -> Result<Vec<PromotedConstraint>, String> {
+        let records = self.verify()?;
+        let mut active = Vec::new();
+        let mut seen_approvals = BTreeSet::new();
+
+        for spend_record in records
+            .iter()
+            .filter(|record| record.record_kind == RuntimeRecordKind::CapabilitySpend)
+        {
+            let parent_id = spend_record
+                .parent_record_ids
+                .first()
+                .ok_or_else(|| "capability spend has no parent".to_string())?;
+            let approval_record = find_record(&records, parent_id)?;
+            if approval_record.record_kind != RuntimeRecordKind::PromotionApproval {
+                continue;
+            }
+            if !seen_approvals.insert(approval_record.record_id.clone()) {
+                continue;
+            }
+
+            let approval: PromotionApprovalReceipt = decode_payload(approval_record)?;
+            let candidate_record_id = approval_record
+                .parent_record_ids
+                .first()
+                .ok_or_else(|| "promotion approval has no candidate parent".to_string())?;
+            let candidate_record = find_record(&records, candidate_record_id)?;
+            if candidate_record.record_kind != RuntimeRecordKind::PromotionCandidate {
+                return Err("promotion approval parent is not a candidate".to_string());
+            }
+            let candidate: ConstraintPromotionCandidateReceipt = decode_payload(candidate_record)?;
+            active.push(promoted_constraint_from_candidate_approval(
+                &candidate,
+                &approval,
+                &approval_record.payload_hash,
+            ));
+        }
+
+        Ok(active)
     }
 
     pub fn run_ef_rescue_attempt(
         &self,
         intent: &ConfirmedIntentCapability,
         externally_supplied_proposal: &MethodProposal,
-        promoted_constraints: &[PromotedConstraint],
     ) -> Result<EfRescueAttemptOutcome, String> {
         let attempt_id = self.next_attempt_id()?;
+        let promoted_constraints = self.active_promoted_constraints()?;
         let (gate_record, gate, allowed) = self.append_external_attempt_gate(
             &attempt_id,
             intent,
             externally_supplied_proposal,
             &self.host_bounds,
-            promoted_constraints,
+            &promoted_constraints,
         )?;
         let Some(allowed) = allowed else {
             return self.record_attempt_failure(
@@ -1908,6 +1962,23 @@ impl RuntimeJournal {
             return Err("blocked gate receipt cannot issue allowed capability".to_string());
         }
         validate_gate_binding(&receipt, intent, proposal)?;
+        let active_constraints = self.active_promoted_constraints()?;
+        issue_allowed_attempt_internal(
+            &self.trace_id,
+            receipt.attempt_id.clone(),
+            intent,
+            proposal,
+            &self.host_bounds,
+            &active_constraints,
+        )
+        .map_err(|gate| {
+            let reasons = if gate.reasons.is_empty() {
+                "unknown current policy rejection".to_string()
+            } else {
+                gate.reasons.join("; ")
+            };
+            format!("gate receipt no longer satisfies current host policy: {reasons}")
+        })?;
         let capability_id = format!("cap-allowed-attempt-{}", receipt.receipt_id);
         self.reject_if_spent(&capability_id)?;
         Ok(AllowedAttemptCapability {
@@ -2520,8 +2591,14 @@ fn verify_semantic_record_bindings(
         RuntimeRecordKind::CapabilitySpend => {
             let spend: CapabilitySpendReceipt = decode_payload(record)?;
             let parent = only_parent(record, by_id)?;
+            let (expected_capability_id, expected_consumed_for) =
+                expected_spend_authority_for_parent(parent)?;
+            let expected_receipt_id = format!("spend-{expected_capability_id}");
             if spend.trace_id != record.trace_id
                 || spend.request_id != record.request_id
+                || spend.receipt_id != expected_receipt_id
+                || spend.capability_id != expected_capability_id
+                || spend.consumed_for != expected_consumed_for
                 || spend.consumed_record_id != parent.record_id
                 || spend.consumed_record_hash != parent.record_hash
                 || spend.consumed_receipt_hash != parent.payload_hash
@@ -2561,6 +2638,43 @@ fn record_receipt_id(record: &RuntimeRecordEnvelope) -> Result<String, String> {
         .and_then(|value| value.as_str())
         .map(str::to_string)
         .ok_or_else(|| format!("{:?} payload has no receipt id", record.record_kind))
+}
+
+fn expected_spend_authority_for_parent(
+    parent: &RuntimeRecordEnvelope,
+) -> Result<(String, String), String> {
+    let receipt_id = record_receipt_id(parent)?;
+    match parent.record_kind {
+        RuntimeRecordKind::GateReceipt => Ok((
+            format!("cap-allowed-attempt-{receipt_id}"),
+            "authorize-work-order".to_string(),
+        )),
+        RuntimeRecordKind::WorkOrderReceipt => Ok((
+            format!("cap-work-order-{receipt_id}"),
+            "execute-work-order".to_string(),
+        )),
+        RuntimeRecordKind::PromotionApproval => Ok((
+            format!("cap-promotion-{receipt_id}"),
+            "promote-constraint".to_string(),
+        )),
+        _ => Err("capability spend parent has no authority action".to_string()),
+    }
+}
+
+fn promoted_constraint_from_candidate_approval(
+    candidate: &ConstraintPromotionCandidateReceipt,
+    approval: &PromotionApprovalReceipt,
+    approval_receipt_hash: &str,
+) -> PromotedConstraint {
+    PromotedConstraint {
+        constraint_id: format!("constraint-from-{}", candidate.receipt_id),
+        trace_id: candidate.trace_id.clone(),
+        request_id: candidate.request_id.clone(),
+        scope: candidate.scope.clone(),
+        lock_signal: candidate.lock_signal.clone(),
+        promotion_approval_receipt_id: approval.receipt_id.clone(),
+        promotion_approval_receipt_hash: approval_receipt_hash.to_string(),
+    }
 }
 
 fn verify_new_record_topology(
@@ -3776,7 +3890,7 @@ mod tests {
         let runtime = tempfile::tempdir().unwrap();
         let journal =
             RuntimeJournal::new(runtime.path(), "trace-1", "request-1", bounds(temp.path()));
-        let allowed = journal.issue_allowed_attempt(&intent, &a, &[]).unwrap();
+        let allowed = journal.issue_allowed_attempt(&intent, &a).unwrap();
         assert!(journal.authorize_work_order(allowed, &intent, &b).is_err());
     }
 
@@ -3789,9 +3903,7 @@ mod tests {
             RuntimeJournal::new(runtime.path(), "trace-1", "request-1", bounds(temp.path()));
         let original = proposal("proposal-a", "README.md", "hello");
         let changed = proposal("proposal-a", "README.md", "changed");
-        let allowed = journal
-            .issue_allowed_attempt(&intent, &original, &[])
-            .unwrap();
+        let allowed = journal.issue_allowed_attempt(&intent, &original).unwrap();
         assert!(journal
             .authorize_work_order(allowed, &intent, &changed)
             .is_err());
@@ -3805,7 +3917,7 @@ mod tests {
         let journal =
             RuntimeJournal::new(runtime.path(), "trace-1", "request-1", bounds(temp.path()));
         let bad = MethodProposal::new("bad", "empty", vec![], vec![]);
-        assert!(journal.issue_allowed_attempt(&intent, &bad, &[]).is_err());
+        assert!(journal.issue_allowed_attempt(&intent, &bad).is_err());
     }
 
     #[test]
@@ -3821,9 +3933,7 @@ mod tests {
         );
         let method = proposal("proposal-a", "README.md", "hello");
 
-        let gate = journal
-            .issue_allowed_attempt(&intent, &method, &[])
-            .unwrap_err();
+        let gate = journal.issue_allowed_attempt(&intent, &method).unwrap_err();
 
         assert!(!gate.admissible());
         assert!(gate
@@ -3843,9 +3953,7 @@ mod tests {
             "request-1",
             bounds(workspace.path()),
         );
-        let allowed = journal
-            .issue_allowed_attempt(&intent, &method, &[])
-            .unwrap();
+        let allowed = journal.issue_allowed_attempt(&intent, &method).unwrap();
         let work_order = journal
             .authorize_work_order(allowed, &intent, &method)
             .unwrap();
@@ -3872,9 +3980,7 @@ mod tests {
             bounds(workspace.path()),
         );
 
-        let outcome = journal
-            .run_ef_rescue_attempt(&intent, &method, &[])
-            .unwrap();
+        let outcome = journal.run_ef_rescue_attempt(&intent, &method).unwrap();
 
         assert!(matches!(outcome, EfRescueAttemptOutcome::Artifact { .. }));
         assert_eq!(
@@ -3892,12 +3998,8 @@ mod tests {
             RuntimeJournal::new(runtime.path(), "trace-1", "request-1", bounds(temp.path()));
         let method = proposal("proposal-a", "README.md", "hello");
 
-        let allowed = journal
-            .issue_allowed_attempt(&intent, &method, &[])
-            .unwrap();
-        let second = journal
-            .issue_allowed_attempt(&intent, &method, &[])
-            .unwrap();
+        let allowed = journal.issue_allowed_attempt(&intent, &method).unwrap();
+        let second = journal.issue_allowed_attempt(&intent, &method).unwrap();
 
         assert_eq!(
             allowed.capability_id(),
@@ -3923,9 +4025,7 @@ mod tests {
         let method = proposal("proposal-a", "README.md", "hello");
         let journal =
             RuntimeJournal::new(runtime.path(), "trace-1", "request-1", bounds(temp.path()));
-        let allowed = journal
-            .issue_allowed_attempt(&intent, &method, &[])
-            .unwrap();
+        let allowed = journal.issue_allowed_attempt(&intent, &method).unwrap();
         let gate_record_id = allowed.gate_record_id.clone();
 
         assert!(journal
@@ -3935,6 +4035,102 @@ mod tests {
         assert!(journal
             .reissue_allowed_attempt(&gate_record_id, &intent, &changed)
             .is_err());
+    }
+
+    #[test]
+    fn reissue_allowed_attempt_applies_current_host_bounds() {
+        let workspace = tempfile::tempdir().unwrap();
+        let runtime = tempfile::tempdir().unwrap();
+        let intent = intent();
+        let method = proposal("proposal-a", "README.md", "hello");
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            HostBounds::new(workspace.path(), 4, 4096),
+        );
+        let allowed = journal.issue_allowed_attempt(&intent, &method).unwrap();
+        let gate_record_id = allowed.gate_record_id.clone();
+
+        let reloaded_with_stricter_bounds = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            HostBounds::new(workspace.path(), 4, 4),
+        );
+        let err = reloaded_with_stricter_bounds
+            .reissue_allowed_attempt(&gate_record_id, &intent, &method)
+            .unwrap_err();
+
+        assert!(err.contains("current host policy"));
+        assert!(err.contains("exceeds byte bound"));
+    }
+
+    #[test]
+    fn reissue_allowed_attempt_applies_current_promoted_constraints() {
+        let workspace = tempfile::tempdir().unwrap();
+        let runtime = tempfile::tempdir().unwrap();
+        let intent = intent();
+        let method = proposal("proposal-a", "README.md", "hello");
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(workspace.path()),
+        );
+        let allowed = journal.issue_allowed_attempt(&intent, &method).unwrap();
+        let gate_record_id = allowed.gate_record_id.clone();
+        let (vault_a, handle_a) = append_attempt_failure(
+            &journal,
+            "attempt-2",
+            &intent,
+            &proposal("proposal-b", "README.md", "wrong-a"),
+        );
+        let (vault_b, handle_b) = append_attempt_failure(
+            &journal,
+            "attempt-3",
+            &intent,
+            &proposal("proposal-c", "README.md", "wrong-b"),
+        );
+        let (vault_c, handle_c) = append_attempt_failure(
+            &journal,
+            "attempt-4",
+            &intent,
+            &proposal("proposal-d", "README.md", "wrong-c"),
+        );
+        let tri = isolate_bounded_fault_condition(
+            &journal,
+            &[handle_a, handle_b, handle_c],
+            "exact write to README.md repeatedly fails acceptance despite materially different attempts",
+        )
+        .unwrap();
+        let tri_record = journal
+            .append_triangulation_receipt(vec![vault_a, vault_b, vault_c], &tri)
+            .unwrap();
+        let candidate = candidate_from_triangulation(&tri, tri_record.payload_hash).unwrap();
+        let candidate_record = journal
+            .append_promotion_candidate(tri_record.record_id, &candidate)
+            .unwrap();
+        let approval = approve_promotion_receipt(
+            &candidate,
+            candidate_record.payload_hash.clone(),
+            external_operator_assertion("operator"),
+        )
+        .unwrap();
+        let approval_record = journal
+            .append_promotion_approval(candidate_record.record_id, &approval)
+            .unwrap();
+        let promotion = journal
+            .reissue_promotion_capability(&approval_record.record_id)
+            .unwrap();
+        journal.promote_constraint(promotion).unwrap();
+
+        let err = journal
+            .reissue_allowed_attempt(&gate_record_id, &intent, &method)
+            .unwrap_err();
+
+        assert!(err.contains("current host policy"));
+        assert!(err.contains("promoted constraint"));
     }
 
     #[test]
@@ -4228,9 +4424,7 @@ mod tests {
             "request-1",
             bounds(Path::new(".")),
         );
-        let allowed = journal
-            .issue_allowed_attempt(&intent, &method, &[])
-            .unwrap();
+        let allowed = journal.issue_allowed_attempt(&intent, &method).unwrap();
         let gate_record_id = allowed.gate_record_id.clone();
         let reissued = journal
             .reissue_allowed_attempt(&gate_record_id, &intent, &method)
@@ -4262,9 +4456,7 @@ mod tests {
             "request-1",
             bounds(workspace.path()),
         );
-        let allowed = journal
-            .issue_allowed_attempt(&intent, &method, &[])
-            .unwrap();
+        let allowed = journal.issue_allowed_attempt(&intent, &method).unwrap();
         let work_order = journal
             .authorize_work_order(allowed, &intent, &method)
             .unwrap();
@@ -4368,9 +4560,7 @@ mod tests {
             "request-1",
             bounds(Path::new(".")),
         );
-        let allowed = journal
-            .issue_allowed_attempt(&intent, &method, &[])
-            .unwrap();
+        let allowed = journal.issue_allowed_attempt(&intent, &method).unwrap();
         let gate_record_id = allowed.gate_record_id.clone();
         let forged = AuthorizedWorkOrderCapability {
             capability_id: "cap-work-order-work-order-attempt-1".to_string(),
@@ -4404,9 +4594,7 @@ mod tests {
             "request-1",
             bounds(Path::new(".")),
         );
-        let allowed = journal
-            .issue_allowed_attempt(&intent, &method, &[])
-            .unwrap();
+        let allowed = journal.issue_allowed_attempt(&intent, &method).unwrap();
         let work_order = journal
             .authorize_work_order(allowed, &intent, &method)
             .unwrap();
@@ -4611,9 +4799,7 @@ mod tests {
             .reissue_confirmed_intent(&confirmed_record_id)
             .unwrap();
         let method = proposal("proposal-a", "README.md", "hello");
-        reloaded
-            .issue_allowed_attempt(&reissued, &method, &[])
-            .unwrap();
+        reloaded.issue_allowed_attempt(&reissued, &method).unwrap();
     }
 
     #[test]
@@ -4662,14 +4848,10 @@ mod tests {
             .unwrap();
 
         journal
-            .issue_allowed_attempt(&intent, &proposal("proposal-a", "README.md", "hello"), &[])
+            .issue_allowed_attempt(&intent, &proposal("proposal-a", "README.md", "hello"))
             .unwrap();
         journal
-            .issue_allowed_attempt(
-                &intent,
-                &proposal("proposal-b", "README.md", "hello again"),
-                &[],
-            )
+            .issue_allowed_attempt(&intent, &proposal("proposal-b", "README.md", "hello again"))
             .unwrap();
 
         let records = journal.verify().unwrap();
@@ -4954,9 +5136,7 @@ mod tests {
             "request-1",
             bounds(Path::new(".")),
         );
-        let allowed = journal
-            .issue_allowed_attempt(&intent, &method, &[])
-            .unwrap();
+        let allowed = journal.issue_allowed_attempt(&intent, &method).unwrap();
         let bad_spend = CapabilitySpendReceipt {
             receipt_id: "spend-forged".to_string(),
             trace_id: "trace-1".to_string(),
@@ -4981,6 +5161,125 @@ mod tests {
     }
 
     #[test]
+    fn promotion_spend_must_use_promotion_action_and_capability_shape() {
+        let runtime = tempfile::tempdir().unwrap();
+        let intent = intent();
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
+        let (approval_record_id, _candidate_record_id, _candidate_hash) =
+            append_isolated_candidate_approval(&journal, &intent);
+        let records = journal.verify().unwrap();
+        let approval_record = find_record(&records, &approval_record_id).unwrap();
+        let approval: PromotionApprovalReceipt =
+            serde_json::from_value(approval_record.payload.clone()).unwrap();
+        let expected_capability_id = format!("cap-promotion-{}", approval.receipt_id);
+        let valid_spend = CapabilitySpendReceipt {
+            receipt_id: format!("spend-{expected_capability_id}"),
+            trace_id: "trace-1".to_string(),
+            request_id: "request-1".to_string(),
+            capability_id: expected_capability_id.clone(),
+            consumed_for: "promote-constraint".to_string(),
+            consumed_receipt_id: approval.receipt_id.clone(),
+            consumed_receipt_hash: approval_record.payload_hash.clone(),
+            consumed_record_id: approval_record.record_id.clone(),
+            consumed_record_hash: approval_record.record_hash.clone(),
+        };
+
+        let mut wrong_action = valid_spend.clone();
+        wrong_action.consumed_for = "authorize-work-order".to_string();
+        assert!(journal
+            .append_record_internal(
+                RuntimeRecordKind::CapabilitySpend,
+                None,
+                vec![approval_record.record_id.clone()],
+                &wrong_action,
+            )
+            .unwrap_err()
+            .contains("capability spend semantic binding mismatch"));
+
+        let mut wrong_capability = valid_spend.clone();
+        wrong_capability.capability_id = format!("cap-work-order-{}", approval.receipt_id);
+        wrong_capability.receipt_id = format!("spend-{}", wrong_capability.capability_id);
+        assert!(journal
+            .append_record_internal(
+                RuntimeRecordKind::CapabilitySpend,
+                None,
+                vec![approval_record.record_id.clone()],
+                &wrong_capability,
+            )
+            .unwrap_err()
+            .contains("capability spend semantic binding mismatch"));
+
+        let mut wrong_receipt_id = valid_spend;
+        wrong_receipt_id.receipt_id = "spend-forged".to_string();
+        assert!(journal
+            .append_record_internal(
+                RuntimeRecordKind::CapabilitySpend,
+                None,
+                vec![approval_record.record_id.clone()],
+                &wrong_receipt_id,
+            )
+            .unwrap_err()
+            .contains("capability spend semantic binding mismatch"));
+    }
+
+    #[test]
+    fn active_promoted_constraints_require_promotion_spend_lineage() {
+        let runtime = tempfile::tempdir().unwrap();
+        let intent = intent();
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
+        let (approval_record_id, _candidate_record_id, _candidate_hash) =
+            append_isolated_candidate_approval(&journal, &intent);
+
+        assert!(journal.active_promoted_constraints().unwrap().is_empty());
+
+        let promotion = journal
+            .reissue_promotion_capability(&approval_record_id)
+            .unwrap();
+        let promoted = journal.promote_constraint(promotion).unwrap();
+        let active = journal.active_promoted_constraints().unwrap();
+
+        assert_eq!(active, vec![promoted]);
+    }
+
+    #[test]
+    fn active_promoted_constraints_reconstruct_after_reload() {
+        let runtime = tempfile::tempdir().unwrap();
+        let intent = intent();
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
+        let (approval_record_id, _candidate_record_id, _candidate_hash) =
+            append_isolated_candidate_approval(&journal, &intent);
+        let promotion = journal
+            .reissue_promotion_capability(&approval_record_id)
+            .unwrap();
+        let promoted = journal.promote_constraint(promotion).unwrap();
+
+        let reloaded = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
+        let active = reloaded.active_promoted_constraints().unwrap();
+
+        assert_eq!(active, vec![promoted]);
+    }
+
+    #[test]
     fn verification_failure_and_observation_hash_bindings_are_enforced_before_append() {
         let workspace = tempfile::tempdir().unwrap();
         let runtime = tempfile::tempdir().unwrap();
@@ -4992,9 +5291,7 @@ mod tests {
             "request-1",
             bounds(workspace.path()),
         );
-        let allowed = journal
-            .issue_allowed_attempt(&intent, &method, &[])
-            .unwrap();
+        let allowed = journal.issue_allowed_attempt(&intent, &method).unwrap();
         let gate_record_id = allowed.gate_record_id.clone();
         let work_order = journal
             .authorize_work_order(allowed, &intent, &method)
@@ -5141,9 +5438,7 @@ mod tests {
             bounds(workspace.path()),
         );
 
-        let outcome = journal
-            .run_ef_rescue_attempt(&intent, &method, &[])
-            .unwrap();
+        let outcome = journal.run_ef_rescue_attempt(&intent, &method).unwrap();
 
         assert!(matches!(outcome, EfRescueAttemptOutcome::Artifact { .. }));
         let records = journal.verify().unwrap();
@@ -5215,9 +5510,7 @@ mod tests {
             bounds(Path::new(".")),
         );
 
-        let outcome = journal
-            .run_ef_rescue_attempt(&intent, &blocked, &[])
-            .unwrap();
+        let outcome = journal.run_ef_rescue_attempt(&intent, &blocked).unwrap();
 
         assert!(matches!(
             outcome,
@@ -5253,9 +5546,7 @@ mod tests {
             bounds(workspace.path()),
         );
 
-        let outcome = journal
-            .run_ef_rescue_attempt(&intent, &method, &[])
-            .unwrap();
+        let outcome = journal.run_ef_rescue_attempt(&intent, &method).unwrap();
 
         assert!(matches!(
             outcome,
@@ -5296,19 +5587,14 @@ mod tests {
             "request-1",
             bounds(Path::new(".")),
         );
-        let promoted = PromotedConstraint {
-            constraint_id: "constraint-1".to_string(),
-            trace_id: "trace-1".to_string(),
-            request_id: "request-1".to_string(),
-            scope: "write:README.md".to_string(),
-            lock_signal: "write:README.md".to_string(),
-            promotion_approval_receipt_id: "approval-1".to_string(),
-            promotion_approval_receipt_hash: "approval-hash".to_string(),
-        };
-
-        let outcome = journal
-            .run_ef_rescue_attempt(&intent, &method, &[promoted])
+        let (approval_record_id, _candidate_record_id, _candidate_hash) =
+            append_isolated_candidate_approval(&journal, &intent);
+        let promotion = journal
+            .reissue_promotion_capability(&approval_record_id)
             .unwrap();
+        journal.promote_constraint(promotion).unwrap();
+
+        let outcome = journal.run_ef_rescue_attempt(&intent, &method).unwrap();
 
         assert!(matches!(
             outcome,
@@ -5326,7 +5612,7 @@ mod tests {
         assert!(kinds.contains(&RuntimeRecordKind::FailureEvidence));
         assert!(kinds.contains(&RuntimeRecordKind::VaultEntry));
         assert!(kinds.contains(&RuntimeRecordKind::FailureObservation));
-        assert!(!kinds.contains(&RuntimeRecordKind::CapabilitySpend));
+        assert!(kinds.contains(&RuntimeRecordKind::CapabilitySpend));
         assert!(!kinds.contains(&RuntimeRecordKind::WorkOrderReceipt));
         assert!(!kinds.contains(&RuntimeRecordKind::ExecutionReceipt));
         assert!(!workspace.path().join("README.md").exists());
@@ -5350,9 +5636,7 @@ mod tests {
             bounds(workspace.path()),
         );
 
-        let outcome = journal
-            .run_ef_rescue_attempt(&intent, &method, &[])
-            .unwrap();
+        let outcome = journal.run_ef_rescue_attempt(&intent, &method).unwrap();
 
         let EfRescueAttemptOutcome::UnresolvedFailure {
             failure_class,
@@ -5397,12 +5681,8 @@ mod tests {
             bounds(workspace.path()),
         );
 
-        let first = journal
-            .run_ef_rescue_attempt(&intent, &method_a, &[])
-            .unwrap();
-        let second = journal
-            .run_ef_rescue_attempt(&intent, &method_b, &[])
-            .unwrap();
+        let first = journal.run_ef_rescue_attempt(&intent, &method_a).unwrap();
+        let second = journal.run_ef_rescue_attempt(&intent, &method_b).unwrap();
 
         assert!(matches!(
             first,
@@ -5469,14 +5749,10 @@ mod tests {
             bounds(workspace.path()),
         );
 
-        journal
-            .run_ef_rescue_attempt(&intent, &method, &[])
-            .unwrap();
+        journal.run_ef_rescue_attempt(&intent, &method).unwrap();
         let records_before = journal.verify().unwrap();
 
-        journal
-            .run_ef_rescue_attempt(&intent, &method, &[])
-            .unwrap();
+        journal.run_ef_rescue_attempt(&intent, &method).unwrap();
 
         let records = journal.verify().unwrap();
         assert!(records.len() > records_before.len());
@@ -5533,6 +5809,7 @@ mod tests {
         tests.compile_fail("tests/ui/live_capability_clone.rs");
         tests.compile_fail("tests/ui/repeat_execute_work_order.rs");
         tests.compile_fail("tests/ui/caller_supplied_host_bounds.rs");
+        tests.compile_fail("tests/ui/caller_supplied_promoted_constraints.rs");
         tests.compile_fail("tests/ui/arbitrary_append_record.rs");
         tests.compile_fail("tests/ui/fabricated_typed_appends.rs");
         tests.compile_fail("tests/ui/forge_authorized_work_order.rs");

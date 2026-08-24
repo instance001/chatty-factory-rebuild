@@ -12,7 +12,7 @@ fn main() {
         }],
         vec![],
     );
-    let mut gate = journal.issue_allowed_attempt(todo!(), &proposal, &[]).unwrap_err();
+    let mut gate = journal.issue_allowed_attempt(todo!(), &proposal).unwrap_err();
     gate.admissible = true;
 }
 

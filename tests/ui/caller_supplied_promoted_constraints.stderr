@@ -1,0 +1,54 @@
+warning: unreachable expression
+ --> tests/ui/caller_supplied_promoted_constraints.rs:7:52
+  |
+7 |     let _ = journal.issue_allowed_attempt(todo!(), todo!(), &constraints);
+  |                                           -------  ^^^^^^^ unreachable expression
+  |                                           |
+  |                                           any code following this expression is unreachable
+  |
+  = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
+  = note: this warning originates in the macro `todo` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0061]: this method takes 2 arguments but 3 arguments were supplied
+ --> tests/ui/caller_supplied_promoted_constraints.rs:7:21
+  |
+7 |     let _ = journal.issue_allowed_attempt(todo!(), todo!(), &constraints);
+  |                     ^^^^^^^^^^^^^^^^^^^^^                   ------------ unexpected argument #3 of type `&Vec<PromotedConstraint>`
+  |
+note: method defined here
+ --> src/lib.rs
+  |
+  |     pub fn issue_allowed_attempt(
+  |            ^^^^^^^^^^^^^^^^^^^^^
+help: remove the extra argument
+  |
+7 -     let _ = journal.issue_allowed_attempt(todo!(), todo!(), &constraints);
+7 +     let _ = journal.issue_allowed_attempt(todo!(), todo!());
+  |
+
+warning: unreachable expression
+ --> tests/ui/caller_supplied_promoted_constraints.rs:8:52
+  |
+8 |     let _ = journal.run_ef_rescue_attempt(todo!(), todo!(), &constraints);
+  |                                           -------  ^^^^^^^ unreachable expression
+  |                                           |
+  |                                           any code following this expression is unreachable
+  |
+  = note: this warning originates in the macro `todo` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0061]: this method takes 2 arguments but 3 arguments were supplied
+ --> tests/ui/caller_supplied_promoted_constraints.rs:8:21
+  |
+8 |     let _ = journal.run_ef_rescue_attempt(todo!(), todo!(), &constraints);
+  |                     ^^^^^^^^^^^^^^^^^^^^^                   ------------ unexpected argument #3 of type `&Vec<PromotedConstraint>`
+  |
+note: method defined here
+ --> src/lib.rs
+  |
+  |     pub fn run_ef_rescue_attempt(
+  |            ^^^^^^^^^^^^^^^^^^^^^
+help: remove the extra argument
+  |
+8 -     let _ = journal.run_ef_rescue_attempt(todo!(), todo!(), &constraints);
+8 +     let _ = journal.run_ef_rescue_attempt(todo!(), todo!());
+  |

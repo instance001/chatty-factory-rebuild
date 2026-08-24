@@ -1,7 +1,7 @@
 warning: unreachable expression
   --> tests/ui/forge_gate_receipt.rs:15:59
    |
-15 |     let mut gate = journal.issue_allowed_attempt(todo!(), &proposal, &[]).unwrap_err();
+15 |     let mut gate = journal.issue_allowed_attempt(todo!(), &proposal).unwrap_err();
    |                                                  -------  ^^^^^^^^^ unreachable expression
    |                                                  |
    |                                                  any code following this expression is unreachable

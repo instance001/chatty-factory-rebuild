@@ -9,12 +9,13 @@ warning: unreachable expression
   = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
   = note: this warning originates in the macro `todo` (in Nightly builds, run with -Z macro-backtrace for more info)
 
-error[E0061]: this method takes 3 arguments but 5 arguments were supplied
+error[E0061]: this method takes 2 arguments but 5 arguments were supplied
  --> tests/ui/caller_supplied_attempt_ids.rs:5:21
   |
 5 |     let _ = journal.issue_allowed_attempt("caller-picked-attempt", todo!(), todo!(), todo!(), &[]);
-  |                     ^^^^^^^^^^^^^^^^^^^^^ -----------------------                             --- unexpected argument #5 of type `&[_; 0]`
-  |                                           |
+  |                     ^^^^^^^^^^^^^^^^^^^^^ -----------------------                    -------  --- unexpected argument #5 of type `&[_; 0]`
+  |                                           |                                          |
+  |                                           |                                          unexpected argument #4 of type `!`
   |                                           unexpected argument #1 of type `&'static str`
   |
 note: method defined here
@@ -25,7 +26,7 @@ note: method defined here
 help: remove the extra arguments
   |
 5 -     let _ = journal.issue_allowed_attempt("caller-picked-attempt", todo!(), todo!(), todo!(), &[]);
-5 +     let _ = journal.issue_allowed_attempt(todo!(), todo!(), todo!());
+5 +     let _ = journal.issue_allowed_attempt(todo!(), todo!());
   |
 
 warning: unreachable expression
@@ -38,12 +39,13 @@ warning: unreachable expression
   |
   = note: this warning originates in the macro `todo` (in Nightly builds, run with -Z macro-backtrace for more info)
 
-error[E0061]: this method takes 3 arguments but 5 arguments were supplied
+error[E0061]: this method takes 2 arguments but 5 arguments were supplied
  --> tests/ui/caller_supplied_attempt_ids.rs:6:21
   |
 6 |     let _ = journal.run_ef_rescue_attempt("caller-picked-attempt", todo!(), todo!(), todo!(), &[]);
-  |                     ^^^^^^^^^^^^^^^^^^^^^ -----------------------                             --- unexpected argument #5 of type `&[_; 0]`
-  |                                           |
+  |                     ^^^^^^^^^^^^^^^^^^^^^ -----------------------                    -------  --- unexpected argument #5 of type `&[_; 0]`
+  |                                           |                                          |
+  |                                           |                                          unexpected argument #4 of type `!`
   |                                           unexpected argument #1 of type `&'static str`
   |
 note: method defined here
@@ -54,5 +56,5 @@ note: method defined here
 help: remove the extra arguments
   |
 6 -     let _ = journal.run_ef_rescue_attempt("caller-picked-attempt", todo!(), todo!(), todo!(), &[]);
-6 +     let _ = journal.run_ef_rescue_attempt(todo!(), todo!(), todo!());
+6 +     let _ = journal.run_ef_rescue_attempt(todo!(), todo!());
   |

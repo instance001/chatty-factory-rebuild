@@ -29,7 +29,7 @@ fn main() {
         vec![],
     );
     let allowed = journal
-        .issue_allowed_attempt(&intent, &proposal, &[])
+        .issue_allowed_attempt(&intent, &proposal)
         .unwrap();
     let work_order = journal
         .authorize_work_order(allowed, &intent, &proposal)
