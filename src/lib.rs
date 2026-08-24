@@ -2888,6 +2888,8 @@ fn verify_failure_matches_parent(
                 {
                     return Err("failure evidence does not match blocked gate parent".to_string());
                 }
+            } else {
+                return Err("admissible gate cannot parent failure evidence".to_string());
             }
         }
         RuntimeRecordKind::VerificationReceipt => {
@@ -4101,10 +4103,60 @@ mod tests {
         let gate_record = journal
             .append_gate_receipt(proposal_record.record_id, &gate)
             .unwrap();
-        let (failure, vault, observation) =
-            failure_receipts_from_gate(&gate, FailureClass::VerificationFailed, lock_signal);
+        let work_order = WorkOrderReceipt {
+            receipt_id: format!("work-order-{attempt_id}"),
+            trace_id: gate.trace_id.clone(),
+            request_id: gate.request_id.clone(),
+            request_hash: gate.request_hash.clone(),
+            confirmed_intent_receipt_id: gate.confirmed_intent_receipt_id.clone(),
+            confirmed_intent_receipt_hash: gate.confirmed_intent_receipt_hash.clone(),
+            attempt_id: gate.attempt_id.clone(),
+            proposal_id: gate.proposal_id.clone(),
+            proposal_hash: gate.proposal_hash.clone(),
+            gate_receipt_id: gate.receipt_id.clone(),
+            gate_receipt_hash: gate_record.payload_hash.clone(),
+            steps: bounded_steps_from_proposal(method),
+        };
+        let work_order_record = journal
+            .append_work_order_receipt_payload(&gate_record.record_id, &work_order)
+            .unwrap();
+        let execution = ExecutionReceipt {
+            receipt_id: format!("execution-{attempt_id}"),
+            trace_id: gate.trace_id.clone(),
+            request_id: gate.request_id.clone(),
+            attempt_id: gate.attempt_id.clone(),
+            work_order_receipt_id: work_order.receipt_id.clone(),
+            work_order_receipt_hash: work_order_record.payload_hash.clone(),
+            executed_steps: work_order.steps.len(),
+            written_files: written_files_from_work_order(&work_order),
+        };
+        let execution_record = journal
+            .append_execution_receipt(work_order_record.record_id, &execution)
+            .unwrap();
+        let verification = VerificationReceipt {
+            receipt_id: format!("verification-{attempt_id}"),
+            trace_id: gate.trace_id.clone(),
+            request_id: gate.request_id.clone(),
+            attempt_id: gate.attempt_id.clone(),
+            execution_receipt_id: execution.receipt_id.clone(),
+            execution_receipt_hash: execution_record.payload_hash.clone(),
+            success: false,
+            checked_claim_ids: vec!["accept-1".to_string()],
+            evidence: vec!["claim 'accept-1' failed: file_contains:README.md::hello".to_string()],
+        };
+        let verification_record = journal
+            .append_verification_receipt(execution_record.record_id, &verification)
+            .unwrap();
+        let (failure, vault, observation) = failure_receipts_from_parent(
+            &gate,
+            verification.receipt_id.clone(),
+            verification_record.payload_hash.clone(),
+            FailureClass::VerificationFailed,
+            verification.evidence.clone(),
+            lock_signal,
+        );
         let failure_record = journal
-            .append_failure_evidence(gate_record.record_id, &failure)
+            .append_failure_evidence(verification_record.record_id, &failure)
             .unwrap();
         let vault_record = journal
             .append_vault_entry(failure_record.record_id, &vault)
@@ -4782,7 +4834,7 @@ mod tests {
             "request-1",
             bounds(Path::new(".")),
         );
-        let (_vault_a, handle_a) = append_attempt_failure(
+        let (vault_a, handle_a) = append_attempt_failure(
             &journal,
             "attempt-1",
             &intent,
@@ -4803,7 +4855,7 @@ mod tests {
             "successful retry ended current recovery need only",
         );
         assert_eq!(dormant.status, TriangulationStatus::Dormant);
-        assert!(journal.reissue_failure_handle("vault-5").is_ok());
+        assert!(journal.reissue_failure_handle(&vault_a).is_ok());
     }
 
     #[test]
@@ -6519,7 +6571,7 @@ mod tests {
             .find(|record| record.record_id == gate_record_id)
             .map(|record| serde_json::from_value(record.payload).unwrap())
             .unwrap();
-        let (mut failure, _vault, mut observation) = failure_receipts_from_gate(
+        let (mut failure, _vault, _observation) = failure_receipts_from_gate(
             &gate,
             FailureClass::VerificationFailed,
             Some("write:README.md".to_string()),
@@ -6528,15 +6580,32 @@ mod tests {
         assert!(journal
             .append_failure_evidence(gate_record_id.clone(), &failure)
             .unwrap_err()
-            .contains("failure evidence semantic binding mismatch"));
+            .contains("admissible gate cannot parent failure evidence"));
 
-        let (failure, vault, _observation) = failure_receipts_from_gate(
-            &gate,
-            FailureClass::VerificationFailed,
-            Some("write:README.md".to_string()),
+        let blocked = MethodProposal::new("proposal-blocked", "external method", vec![], vec![]);
+        let records = journal.verify().unwrap();
+        let confirmed_record = records
+            .iter()
+            .find(|record| record.record_kind == RuntimeRecordKind::ConfirmedIntentReceipt)
+            .unwrap();
+        let blocked_proposal_record = journal
+            .append_proposal("attempt-2", confirmed_record.record_id.clone(), &blocked)
+            .unwrap();
+        let blocked_gate = gate_attempt_receipt(
+            "trace-1",
+            "attempt-2",
+            &intent,
+            &blocked,
+            &bounds(workspace.path()),
+            &[],
         );
+        let blocked_gate_record = journal
+            .append_gate_receipt(blocked_proposal_record.record_id, &blocked_gate)
+            .unwrap();
+        let (failure, vault, mut observation) =
+            failure_receipts_from_gate(&blocked_gate, FailureClass::AdmissibilityRejected, None);
         let failure_record = journal
-            .append_failure_evidence(gate_record_id, &failure)
+            .append_failure_evidence(blocked_gate_record.record_id, &failure)
             .unwrap();
         let vault_record = journal
             .append_vault_entry(failure_record.record_id, &vault)
@@ -7056,6 +7125,15 @@ mod tests {
             .reissue_promotion_capability(&approval_record_id)
             .unwrap();
         journal.promote_constraint(promotion).unwrap();
+        let before = journal.verify().unwrap();
+        let work_orders_before = before
+            .iter()
+            .filter(|record| record.record_kind == RuntimeRecordKind::WorkOrderReceipt)
+            .count();
+        let executions_before = before
+            .iter()
+            .filter(|record| record.record_kind == RuntimeRecordKind::ExecutionReceipt)
+            .count();
 
         let outcome = journal.run_ef_rescue_attempt(&intent, &method).unwrap();
 
@@ -7076,8 +7154,20 @@ mod tests {
         assert!(kinds.contains(&RuntimeRecordKind::VaultEntry));
         assert!(kinds.contains(&RuntimeRecordKind::FailureObservation));
         assert!(kinds.contains(&RuntimeRecordKind::CapabilitySpend));
-        assert!(!kinds.contains(&RuntimeRecordKind::WorkOrderReceipt));
-        assert!(!kinds.contains(&RuntimeRecordKind::ExecutionReceipt));
+        assert_eq!(
+            kinds
+                .iter()
+                .filter(|kind| **kind == RuntimeRecordKind::WorkOrderReceipt)
+                .count(),
+            work_orders_before
+        );
+        assert_eq!(
+            kinds
+                .iter()
+                .filter(|kind| **kind == RuntimeRecordKind::ExecutionReceipt)
+                .count(),
+            executions_before
+        );
         assert!(!workspace.path().join("README.md").exists());
     }
 
@@ -7127,6 +7217,15 @@ mod tests {
             .reissue_promotion_capability(approval_record.record_id())
             .unwrap();
         let promoted = journal.promote_constraint(promotion).unwrap();
+        let before = journal.verify().unwrap();
+        let work_orders_before = before
+            .iter()
+            .filter(|record| record.record_kind == RuntimeRecordKind::WorkOrderReceipt)
+            .count();
+        let executions_before = before
+            .iter()
+            .filter(|record| record.record_kind == RuntimeRecordKind::ExecutionReceipt)
+            .count();
 
         let outcome = journal.run_ef_rescue_attempt(&intent, &method).unwrap();
 
@@ -7154,8 +7253,20 @@ mod tests {
         assert!(kinds.contains(&RuntimeRecordKind::FailureEvidence));
         assert!(kinds.contains(&RuntimeRecordKind::VaultEntry));
         assert!(kinds.contains(&RuntimeRecordKind::FailureObservation));
-        assert!(!kinds.contains(&RuntimeRecordKind::WorkOrderReceipt));
-        assert!(!kinds.contains(&RuntimeRecordKind::ExecutionReceipt));
+        assert_eq!(
+            kinds
+                .iter()
+                .filter(|kind| **kind == RuntimeRecordKind::WorkOrderReceipt)
+                .count(),
+            work_orders_before
+        );
+        assert_eq!(
+            kinds
+                .iter()
+                .filter(|kind| **kind == RuntimeRecordKind::ExecutionReceipt)
+                .count(),
+            executions_before
+        );
         assert!(!workspace.path().join("README.md").exists());
     }
 
