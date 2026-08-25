@@ -4917,6 +4917,28 @@ mod tests {
     }
 
     #[test]
+    fn model_proposal_id_does_not_control_host_attempt_id() {
+        let temp = tempfile::tempdir().unwrap();
+        let intent = intent();
+        let runtime = tempfile::tempdir().unwrap();
+        let journal =
+            RuntimeJournal::new(runtime.path(), "trace-1", "request-1", bounds(temp.path()));
+        let method = proposal("attempt-999-gate-forged-by-model", "README.md", "hello");
+
+        let allowed = journal.issue_allowed_attempt(&intent, &method).unwrap();
+
+        assert_eq!(allowed.gate_receipt().attempt_id(), "attempt-1");
+        assert_eq!(
+            allowed.capability_id(),
+            "cap-allowed-attempt-gate-attempt-1"
+        );
+        assert_eq!(
+            allowed.gate_receipt().proposal_id(),
+            "attempt-999-gate-forged-by-model"
+        );
+    }
+
+    #[test]
     fn valid_verified_journal_reissues_only_exact_allowed_capability() {
         let temp = tempfile::tempdir().unwrap();
         let runtime = tempfile::tempdir().unwrap();
@@ -4933,6 +4955,18 @@ mod tests {
         let changed = proposal("proposal-a", "README.md", "changed");
         assert!(journal
             .reissue_allowed_attempt(&gate_record_id, &intent, &changed)
+            .is_err());
+        let changed_metadata = MethodProposal::new(
+            "proposal-a",
+            "changed model summary",
+            vec![ProposedStep::WriteFile {
+                path: PathBuf::from("README.md"),
+                contents: "hello".to_string(),
+            }],
+            vec!["changed model suggested verification".to_string()],
+        );
+        assert!(journal
+            .reissue_allowed_attempt(&gate_record_id, &intent, &changed_metadata)
             .is_err());
     }
 
@@ -6609,6 +6643,313 @@ mod tests {
                 ),
             )
             .is_ok());
+    }
+
+    #[test]
+    fn broad_fault_explanation_text_does_not_broaden_constraint_scope() {
+        let runtime = tempfile::tempdir().unwrap();
+        let intent = intent();
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
+        let (_vault_a, handle_a) = append_attempt_failure(
+            &journal,
+            "attempt-1",
+            &intent,
+            &proposal("proposal-a", "README.md", "wrong-a"),
+        );
+        let (_vault_b, handle_b) = append_attempt_failure(
+            &journal,
+            "attempt-2",
+            &intent,
+            &proposal("proposal-b", "README.md", "wrong-b"),
+        );
+        let (_vault_c, handle_c) = append_attempt_failure(
+            &journal,
+            "attempt-3",
+            &intent,
+            &proposal("proposal-c", "README.md", "wrong-c"),
+        );
+        let (_triangulation_record, candidate_record) = journal
+            .record_isolated_promotion_candidate(
+                &[handle_a, handle_b, handle_c],
+                "all write-file methods are suspect",
+            )
+            .unwrap();
+        let approval_record = journal
+            .approve_promotion_candidate(
+                candidate_record.record_id(),
+                external_operator_assertion("operator-approval"),
+            )
+            .unwrap();
+        let promotion = journal
+            .reissue_promotion_capability(approval_record.record_id())
+            .unwrap();
+        let promoted = journal.promote_constraint(promotion).unwrap();
+
+        assert_eq!(promoted.scope(), "write:README.md");
+        assert_eq!(promoted.lock_signal(), "write:README.md");
+        assert!(journal
+            .issue_allowed_attempt(
+                &intent,
+                &proposal("other-write-not-covered-by-prose", "OTHER.md", "hello"),
+            )
+            .is_ok());
+    }
+
+    #[test]
+    fn mixed_proposal_is_blocked_only_by_its_intersecting_effect() {
+        let runtime = tempfile::tempdir().unwrap();
+        let intent = intent();
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
+        let (approval_record_id, _, _) = append_isolated_candidate_approval(&journal, &intent);
+        let promotion = journal
+            .reissue_promotion_capability(&approval_record_id)
+            .unwrap();
+        let promoted = journal.promote_constraint(promotion).unwrap();
+        let mixed = MethodProposal::new(
+            "proposal-mixed-blocked-and-open-effects",
+            "external method",
+            vec![
+                ProposedStep::WriteFile {
+                    path: PathBuf::from("README.md"),
+                    contents: "hello".to_string(),
+                },
+                ProposedStep::WriteFile {
+                    path: PathBuf::from("OTHER.md"),
+                    contents: "hello".to_string(),
+                },
+            ],
+            vec![],
+        );
+
+        let blocked = journal.issue_allowed_attempt(&intent, &mixed).unwrap_err();
+
+        assert_eq!(
+            blocked.blocked_by_constraint_ids(),
+            &[promoted.constraint_id().to_string()]
+        );
+        assert!(journal
+            .issue_allowed_attempt(
+                &intent,
+                &proposal("proposal-open-effect-alone", "OTHER.md", "hello"),
+            )
+            .is_ok());
+    }
+
+    #[test]
+    fn constraints_do_not_replace_host_bounds_rejection_evidence() {
+        let runtime = tempfile::tempdir().unwrap();
+        let intent = intent();
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            HostBounds::new(Path::new("."), 4, 4),
+        );
+        let (approval_record_id, _, _) = append_isolated_candidate_approval(&journal, &intent);
+        let promotion = journal
+            .reissue_promotion_capability(&approval_record_id)
+            .unwrap();
+        let promoted = journal.promote_constraint(promotion).unwrap();
+
+        let blocked = journal
+            .issue_allowed_attempt(
+                &intent,
+                &proposal(
+                    "proposal-too-large-and-constrained",
+                    "README.md",
+                    "too large",
+                ),
+            )
+            .unwrap_err();
+
+        assert_eq!(
+            blocked.blocked_by_constraint_ids(),
+            &[promoted.constraint_id().to_string()]
+        );
+        assert!(blocked
+            .reasons()
+            .contains(&"file 'README.md' exceeds byte bound".to_string()));
+        assert!(blocked
+            .reasons()
+            .iter()
+            .any(|reason| reason.contains("blocks lock signal 'write:README.md'")));
+    }
+
+    #[test]
+    fn host_bounds_rejection_does_not_claim_unmatched_constraints() {
+        let runtime = tempfile::tempdir().unwrap();
+        let intent = intent();
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            HostBounds::new(Path::new("."), 4, 4),
+        );
+        let (approval_record_id, _, _) = append_isolated_candidate_approval(&journal, &intent);
+        let promotion = journal
+            .reissue_promotion_capability(&approval_record_id)
+            .unwrap();
+        journal.promote_constraint(promotion).unwrap();
+
+        let blocked = journal
+            .issue_allowed_attempt(
+                &intent,
+                &proposal("proposal-too-large-only", "OTHER.md", "too large"),
+            )
+            .unwrap_err();
+
+        assert!(blocked.blocked_by_constraint_ids().is_empty());
+        assert_eq!(
+            blocked.reasons(),
+            &["file 'OTHER.md' exceeds byte bound".to_string()]
+        );
+    }
+
+    #[test]
+    fn empty_proposal_rejection_does_not_claim_active_constraints() {
+        let runtime = tempfile::tempdir().unwrap();
+        let intent = intent();
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
+        let (approval_record_id, _, _) = append_isolated_candidate_approval(&journal, &intent);
+        let promotion = journal
+            .reissue_promotion_capability(&approval_record_id)
+            .unwrap();
+        journal.promote_constraint(promotion).unwrap();
+        let empty = MethodProposal::new(
+            "proposal-empty-with-active-constraint",
+            "external method claims unknown route",
+            vec![],
+            vec!["unknown method should be allowed by imagination, but has no effect".to_string()],
+        );
+
+        let blocked = journal.issue_allowed_attempt(&intent, &empty).unwrap_err();
+
+        assert!(blocked.blocked_by_constraint_ids().is_empty());
+        assert_eq!(
+            blocked.reasons(),
+            &["method proposal contains no executable steps".to_string()]
+        );
+    }
+
+    #[test]
+    fn multiple_active_constraints_block_only_matching_effects() {
+        let runtime = tempfile::tempdir().unwrap();
+        let intent = intent();
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
+        let (readme_approval_id, _, _) = append_isolated_candidate_approval(&journal, &intent);
+        let readme_promotion = journal
+            .reissue_promotion_capability(&readme_approval_id)
+            .unwrap();
+        let readme_constraint = journal.promote_constraint(readme_promotion).unwrap();
+        let (_vault_a, handle_a) = append_attempt_failure_with_lock(
+            &journal,
+            "attempt-4",
+            &intent,
+            &proposal("proposal-other-a", "OTHER.md", "wrong-a"),
+            Some("write:OTHER.md".to_string()),
+        );
+        let (_vault_b, handle_b) = append_attempt_failure_with_lock(
+            &journal,
+            "attempt-5",
+            &intent,
+            &proposal("proposal-other-b", "OTHER.md", "wrong-b"),
+            Some("write:OTHER.md".to_string()),
+        );
+        let (_vault_c, handle_c) = append_attempt_failure_with_lock(
+            &journal,
+            "attempt-6",
+            &intent,
+            &proposal("proposal-other-c", "OTHER.md", "wrong-c"),
+            Some("write:OTHER.md".to_string()),
+        );
+        let (_triangulation_record, other_candidate_record) = journal
+            .record_isolated_promotion_candidate(
+                &[handle_a, handle_b, handle_c],
+                "exact write to OTHER.md repeatedly fails acceptance despite materially different attempts",
+            )
+            .unwrap();
+        let other_approval = journal
+            .approve_promotion_candidate(
+                other_candidate_record.record_id(),
+                external_operator_assertion("operator-approval-other"),
+            )
+            .unwrap();
+        let other_promotion = journal
+            .reissue_promotion_capability(other_approval.record_id())
+            .unwrap();
+        let other_constraint = journal.promote_constraint(other_promotion).unwrap();
+
+        let readme_blocked = journal
+            .issue_allowed_attempt(
+                &intent,
+                &proposal("proposal-readme-only", "README.md", "hello"),
+            )
+            .unwrap_err();
+        let other_blocked = journal
+            .issue_allowed_attempt(
+                &intent,
+                &proposal("proposal-other-only", "OTHER.md", "hello"),
+            )
+            .unwrap_err();
+
+        assert_eq!(
+            readme_blocked.blocked_by_constraint_ids(),
+            &[readme_constraint.constraint_id().to_string()]
+        );
+        assert_eq!(
+            other_blocked.blocked_by_constraint_ids(),
+            &[other_constraint.constraint_id().to_string()]
+        );
+        assert!(journal
+            .issue_allowed_attempt(
+                &intent,
+                &proposal("proposal-uncovered-by-either-law", "THIRD.md", "hello"),
+            )
+            .is_ok());
+
+        let mixed = MethodProposal::new(
+            "proposal-intersects-both-laws",
+            "external method",
+            vec![
+                ProposedStep::WriteFile {
+                    path: PathBuf::from("README.md"),
+                    contents: "hello".to_string(),
+                },
+                ProposedStep::WriteFile {
+                    path: PathBuf::from("OTHER.md"),
+                    contents: "hello".to_string(),
+                },
+            ],
+            vec![],
+        );
+        let mixed_blocked = journal.issue_allowed_attempt(&intent, &mixed).unwrap_err();
+        assert_eq!(
+            mixed_blocked.blocked_by_constraint_ids(),
+            &[
+                readme_constraint.constraint_id().to_string(),
+                other_constraint.constraint_id().to_string()
+            ]
+        );
     }
 
     #[test]
