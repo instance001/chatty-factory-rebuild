@@ -6297,6 +6297,207 @@ mod tests {
     }
 
     #[test]
+    fn novel_unregistered_method_reaches_bounded_execution() {
+        let workspace = tempfile::tempdir().unwrap();
+        let runtime = tempfile::tempdir().unwrap();
+        let intent = intent();
+        let method = MethodProposal::new(
+            "never-before-seen-circuitous-method",
+            "unfamiliar model-supplied method with no positive registration",
+            vec![ProposedStep::WriteFile {
+                path: PathBuf::from("NOT_A_TEMPLATE.md"),
+                contents: "hello from an unseen route".to_string(),
+            }],
+            vec![
+                "model suggested a strange verification note".to_string(),
+                "no template membership asserted".to_string(),
+            ],
+        );
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(workspace.path()),
+        );
+
+        let allowed = journal.issue_allowed_attempt(&intent, &method).unwrap();
+        let work_order = journal
+            .authorize_work_order(allowed, &intent, &method)
+            .unwrap();
+        let execution = journal.execute_work_order(work_order).unwrap();
+
+        assert_eq!(
+            execution.written_files(),
+            &[PathBuf::from("NOT_A_TEMPLATE.md")]
+        );
+        assert!(workspace.path().join("NOT_A_TEMPLATE.md").exists());
+        let records = journal.verify().unwrap();
+        assert!(records
+            .iter()
+            .any(|record| record.record_kind == RuntimeRecordKind::GateReceipt));
+        assert!(records
+            .iter()
+            .any(|record| record.record_kind == RuntimeRecordKind::WorkOrderReceipt));
+        assert!(records
+            .iter()
+            .any(|record| record.record_kind == RuntimeRecordKind::CapabilitySpend));
+    }
+
+    #[test]
+    fn preference_and_ambiguity_claims_do_not_create_method_lanes() {
+        let workspace = tempfile::tempdir().unwrap();
+        let runtime = tempfile::tempdir().unwrap();
+        let request = "Create README with hello. Prefer a TypeScript implementation if convenient. Ambiguous whether tests are required.";
+        let preference = "Prefer a TypeScript implementation if convenient.";
+        let ambiguity = "Ambiguous whether tests are required.";
+        let preference_start = request.find(preference).unwrap();
+        let ambiguity_start = request.find(ambiguity).unwrap();
+        let intent = confirm_intent(
+            IntentDraft {
+                draft_id: "draft-preference-ambiguity".to_string(),
+                exact_request: ExactRequest::new("request-1", request),
+                derived_claims: vec![
+                    IntentClaim {
+                        claim_id: "accept-1".to_string(),
+                        kind: IntentClaimKind::AcceptanceCriterion,
+                        text: "file_contains:README.md::hello".to_string(),
+                        source_spans: vec![SourceSpan::new(0, request.len(), request)],
+                    },
+                    IntentClaim {
+                        claim_id: "prefer-1".to_string(),
+                        kind: IntentClaimKind::Preference,
+                        text: preference.to_string(),
+                        source_spans: vec![SourceSpan::new(
+                            preference_start,
+                            preference_start + preference.len(),
+                            preference,
+                        )],
+                    },
+                    IntentClaim {
+                        claim_id: "ambiguous-1".to_string(),
+                        kind: IntentClaimKind::Ambiguity,
+                        text: ambiguity.to_string(),
+                        source_spans: vec![SourceSpan::new(
+                            ambiguity_start,
+                            ambiguity_start + ambiguity.len(),
+                            ambiguity,
+                        )],
+                    },
+                ],
+            },
+            external_operator_assertion("operator-confirmation"),
+        )
+        .unwrap();
+        let method = MethodProposal::new(
+            "plain-write-no-typescript-no-test-lane",
+            "ordinary bounded write method",
+            vec![ProposedStep::WriteFile {
+                path: PathBuf::from("README.md"),
+                contents: "hello".to_string(),
+            }],
+            vec![],
+        );
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(workspace.path()),
+        );
+
+        let allowed = journal.issue_allowed_attempt(&intent, &method).unwrap();
+        let work_order = journal
+            .authorize_work_order(allowed, &intent, &method)
+            .unwrap();
+        let execution = journal.execute_work_order(work_order).unwrap();
+        let verification = verify_against_intent(&execution, &intent, &bounds(workspace.path()));
+
+        assert!(verification.success());
+        assert_eq!(verification.checked_claim_ids(), &["accept-1".to_string()]);
+        assert!(workspace.path().join("README.md").exists());
+    }
+
+    #[test]
+    fn earned_negative_constraint_does_not_become_positive_allow_list() {
+        let runtime = tempfile::tempdir().unwrap();
+        let intent = intent();
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
+        let (_vault_a, handle_a) = append_attempt_failure(
+            &journal,
+            "attempt-1",
+            &intent,
+            &proposal("proposal-a", "README.md", "wrong-a"),
+        );
+        let (_vault_b, handle_b) = append_attempt_failure(
+            &journal,
+            "attempt-2",
+            &intent,
+            &proposal("proposal-b", "README.md", "wrong-b"),
+        );
+        let (_vault_c, handle_c) = append_attempt_failure(
+            &journal,
+            "attempt-3",
+            &intent,
+            &proposal("proposal-c", "README.md", "wrong-c"),
+        );
+        let (_triangulation_record, candidate_record) = journal
+            .record_isolated_promotion_candidate(
+                &[handle_a, handle_b, handle_c],
+                "exact write to README.md repeatedly fails acceptance despite materially different attempts",
+            )
+            .unwrap();
+        let approval_record = journal
+            .approve_promotion_candidate(
+                candidate_record.record_id(),
+                external_operator_assertion("operator-approval"),
+            )
+            .unwrap();
+        let promotion = journal
+            .reissue_promotion_capability(approval_record.record_id())
+            .unwrap();
+        let promoted = journal.promote_constraint(promotion).unwrap();
+        assert_eq!(promoted.lock_signal(), "write:README.md");
+
+        let exact_blocked = journal
+            .issue_allowed_attempt(
+                &intent,
+                &proposal("repeat-evidenced-bad-region", "README.md", "hello"),
+            )
+            .unwrap_err();
+        assert_eq!(
+            exact_blocked.blocked_by_constraint_ids(),
+            &[promoted.constraint_id().to_string()]
+        );
+
+        assert!(journal
+            .issue_allowed_attempt(
+                &intent,
+                &proposal("same-content-other-target", "OTHER.md", "hello"),
+            )
+            .is_ok());
+        assert!(journal
+            .issue_allowed_attempt(
+                &intent,
+                &proposal("nearby-name-other-target", "README.copy.md", "hello"),
+            )
+            .is_ok());
+        assert!(journal
+            .issue_allowed_attempt(
+                &intent,
+                &proposal(
+                    "unknown-route-after-negative-learning",
+                    "SURPRISE.md",
+                    "hello"
+                ),
+            )
+            .is_ok());
+    }
+
+    #[test]
     fn approve_promotion_candidate_rejects_non_candidate_or_forged_assertion() {
         let runtime = tempfile::tempdir().unwrap();
         let intent = intent();
@@ -8402,6 +8603,98 @@ mod tests {
     }
 
     #[test]
+    fn model_suggested_verification_text_is_not_authoritative() {
+        let workspace = tempfile::tempdir().unwrap();
+        let runtime = tempfile::tempdir().unwrap();
+        let intent = intent();
+        let method = MethodProposal::new(
+            "proposal-model-claims-success",
+            "write the wrong bytes while suggesting a self-serving check",
+            vec![ProposedStep::WriteFile {
+                path: PathBuf::from("README.md"),
+                contents: "wrong".to_string(),
+            }],
+            vec!["model says the README contains hello".to_string()],
+        );
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(workspace.path()),
+        );
+        let allowed = journal.issue_allowed_attempt(&intent, &method).unwrap();
+        let work_order = journal
+            .authorize_work_order(allowed, &intent, &method)
+            .unwrap();
+        let work_order_record_id = work_order.work_order_record_id.clone();
+        let execution = journal.execute_work_order(work_order).unwrap();
+        let execution_record = journal
+            .append_execution_receipt(work_order_record_id, &execution)
+            .unwrap();
+        let verification = verify_against_intent(&execution, &intent, &bounds(workspace.path()));
+        let verification_record = journal
+            .append_verification_receipt(execution_record.record_id, &verification)
+            .unwrap();
+
+        assert!(!verification.success());
+        assert_eq!(verification.checked_claim_ids(), &["accept-1".to_string()]);
+        assert_eq!(
+            verification.evidence(),
+            &["claim 'accept-1' failed: file_contains:README.md::hello".to_string()]
+        );
+        assert!(journal.verify().unwrap().iter().any(|record| {
+            record.record_kind == RuntimeRecordKind::VerificationReceipt
+                && record.record_id == verification_record.record_id
+        }));
+    }
+
+    #[test]
+    fn successful_execution_alone_does_not_define_acceptance() {
+        let workspace = tempfile::tempdir().unwrap();
+        let runtime = tempfile::tempdir().unwrap();
+        let intent = intent();
+        let method = proposal("proposal-executes-but-fails-intent", "README.md", "wrong");
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(workspace.path()),
+        );
+        let outcome = journal.run_ef_rescue_attempt(&intent, &method).unwrap();
+
+        let EfRescueAttemptOutcome::UnresolvedFailure {
+            failure_class,
+            failure,
+            ..
+        } = outcome
+        else {
+            panic!("executed-but-unaccepted artifact must remain a verification failure");
+        };
+        assert_eq!(failure_class, FailureClass::VerificationFailed);
+        assert_eq!(failure.failure_class(), &FailureClass::VerificationFailed);
+        assert_eq!(
+            failure.evidence(),
+            &["claim 'accept-1' failed: file_contains:README.md::hello".to_string()]
+        );
+        let records = journal.verify().unwrap();
+        let execution_record = records
+            .iter()
+            .find(|record| record.record_kind == RuntimeRecordKind::ExecutionReceipt)
+            .unwrap();
+        let execution: ExecutionReceipt = decode_payload(execution_record).unwrap();
+        assert_eq!(execution.written_files(), &[PathBuf::from("README.md")]);
+        assert!(records
+            .iter()
+            .any(|record| record.record_kind == RuntimeRecordKind::ExecutionReceipt));
+        assert!(records
+            .iter()
+            .any(|record| record.record_kind == RuntimeRecordKind::FailureEvidence));
+        assert!(!records
+            .iter()
+            .any(|record| record.record_kind == RuntimeRecordKind::PromotionCandidate));
+    }
+
+    #[test]
     fn triangulation_rejects_failure_handles_from_another_journal() {
         let runtime_a = tempfile::tempdir().unwrap();
         let runtime_b = tempfile::tempdir().unwrap();
@@ -8987,6 +9280,38 @@ mod tests {
         assert!(!kinds.contains(&RuntimeRecordKind::TriangulationReceipt));
         assert!(!kinds.contains(&RuntimeRecordKind::PromotionCandidate));
         assert!(!kinds.contains(&RuntimeRecordKind::PromotionApproval));
+    }
+
+    #[test]
+    fn successful_method_does_not_create_preference_or_policy_bypass() {
+        let workspace = tempfile::tempdir().unwrap();
+        let runtime = tempfile::tempdir().unwrap();
+        let intent = intent();
+        let succeeds = proposal("proposal-succeeds", "README.md", "hello");
+        let later_novel = proposal("proposal-later-novel", "LATER.md", "hello");
+        let invalid = MethodProposal::new("proposal-empty-after-success", "empty", vec![], vec![]);
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(workspace.path()),
+        );
+
+        assert!(matches!(
+            journal.run_ef_rescue_attempt(&intent, &succeeds).unwrap(),
+            EfRescueAttemptOutcome::Artifact { .. }
+        ));
+
+        assert!(journal.issue_allowed_attempt(&intent, &later_novel).is_ok());
+        let blocked = journal
+            .issue_allowed_attempt(&intent, &invalid)
+            .unwrap_err();
+        assert!(!blocked.admissible());
+        assert_eq!(
+            blocked.reasons(),
+            &["method proposal contains no executable steps".to_string()]
+        );
+        assert!(journal.active_promoted_constraints().unwrap().is_empty());
     }
 
     #[test]
