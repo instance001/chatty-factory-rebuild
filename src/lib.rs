@@ -1437,6 +1437,24 @@ impl RuntimeJournal {
         parent_proposal_record_id: String,
         receipt: &GateReceipt,
     ) -> Result<RuntimeRecordEnvelope, String> {
+        validate_gate_decision_shape(receipt)?;
+        let records = self.verify()?;
+        let by_id = records
+            .iter()
+            .map(|record| (record.record_id.clone(), record.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let proposal_record = find_record(&records, &parent_proposal_record_id)?;
+        let proposal: MethodProposal = decode_payload(proposal_record)?;
+        let intent_record = only_parent(proposal_record, &by_id)?;
+        let intent: ConfirmedIntentReceipt = decode_payload(intent_record)?;
+        verify_gate_decision_against_prior_policy(
+            receipt,
+            &intent,
+            intent_record,
+            &proposal,
+            &self.host_bounds,
+            &by_id,
+        )?;
         self.append_record_internal(
             RuntimeRecordKind::GateReceipt,
             Some(&receipt.attempt_id),
@@ -1814,43 +1832,11 @@ impl RuntimeJournal {
     #[cfg_attr(not(test), allow(dead_code))]
     fn active_promoted_constraints(&self) -> Result<Vec<PromotedConstraint>, String> {
         let records = self.verify()?;
-        let mut active = Vec::new();
-        let mut seen_approvals = BTreeSet::new();
-
-        for spend_record in records
+        let by_id = records
             .iter()
-            .filter(|record| record.record_kind == RuntimeRecordKind::CapabilitySpend)
-        {
-            let parent_id = spend_record
-                .parent_record_ids
-                .first()
-                .ok_or_else(|| "capability spend has no parent".to_string())?;
-            let approval_record = find_record(&records, parent_id)?;
-            if approval_record.record_kind != RuntimeRecordKind::PromotionApproval {
-                continue;
-            }
-            if !seen_approvals.insert(approval_record.record_id.clone()) {
-                continue;
-            }
-
-            let approval: PromotionApprovalReceipt = decode_payload(approval_record)?;
-            let candidate_record_id = approval_record
-                .parent_record_ids
-                .first()
-                .ok_or_else(|| "promotion approval has no candidate parent".to_string())?;
-            let candidate_record = find_record(&records, candidate_record_id)?;
-            if candidate_record.record_kind != RuntimeRecordKind::PromotionCandidate {
-                return Err("promotion approval parent is not a candidate".to_string());
-            }
-            let candidate: ConstraintPromotionCandidateReceipt = decode_payload(candidate_record)?;
-            active.push(promoted_constraint_from_candidate_approval(
-                &candidate,
-                &approval,
-                &approval_record.payload_hash,
-            ));
-        }
-
-        Ok(active)
+            .map(|record| (record.record_id.clone(), record.clone()))
+            .collect::<BTreeMap<_, _>>();
+        active_promoted_constraints_from_records(&by_id)
     }
 
     pub fn run_ef_rescue_attempt(
@@ -2288,8 +2274,11 @@ impl RuntimeJournal {
             .map(|record| (record.record_id.clone(), record.clone()))
             .collect::<BTreeMap<_, _>>();
         verify_existing_record_topology(&envelope, &by_id, &self.host_bounds)?;
+        reject_duplicate_attempt_stage(&envelope, existing.iter())?;
         reject_duplicate_confirmed_intent_receipt(&envelope, existing.iter())?;
         reject_duplicate_capability_spend(&envelope, existing.iter())?;
+        reject_duplicate_receipt_id(&envelope, existing.iter())?;
+        reject_duplicate_promotion_approval_parent(&envelope, existing.iter())?;
         let json = serde_json::to_string(&envelope)
             .map_err(|err| format!("could not serialize runtime record: {err}"))?;
         let path = self.journal_path();
@@ -2427,6 +2416,9 @@ fn verify_records(
     let mut record_ids = BTreeSet::new();
     let mut sequences = BTreeSet::new();
     let mut confirmed_intent_receipts = BTreeSet::new();
+    let mut receipt_ids = BTreeSet::new();
+    let mut attempt_stage_records = BTreeSet::new();
+    let mut approved_candidate_record_ids = BTreeSet::new();
     let mut by_id = BTreeMap::new();
     let mut spent_capabilities = BTreeSet::new();
     let mut previous_hash = None;
@@ -2502,10 +2494,97 @@ fn verify_records(
                 return Err("duplicate capability spend".to_string());
             }
         }
+        if let Some(receipt_id) = maybe_record_receipt_id(record)? {
+            if !receipt_ids.insert(receipt_id) {
+                return Err("duplicate receipt id".to_string());
+            }
+        }
+        if let Some(attempt_stage) = attempt_stage_key(record) {
+            if !attempt_stage_records.insert(attempt_stage) {
+                return Err("duplicate attempt stage record".to_string());
+            }
+        }
+        if record.record_kind == RuntimeRecordKind::PromotionApproval {
+            let candidate_record_id = record
+                .parent_record_ids
+                .first()
+                .ok_or_else(|| "promotion approval has no candidate parent".to_string())?;
+            if !approved_candidate_record_ids.insert(candidate_record_id.clone()) {
+                return Err("duplicate promotion approval for candidate".to_string());
+            }
+        }
         previous_hash = Some(record.record_hash.clone());
         by_id.insert(record.record_id.clone(), record.clone());
     }
     Ok(())
+}
+
+fn reject_duplicate_receipt_id<'a>(
+    record: &RuntimeRecordEnvelope,
+    existing: impl Iterator<Item = &'a RuntimeRecordEnvelope>,
+) -> Result<(), String> {
+    let Some(receipt_id) = maybe_record_receipt_id(record)? else {
+        return Ok(());
+    };
+    for existing_record in existing {
+        if maybe_record_receipt_id(existing_record)?.as_deref() == Some(receipt_id.as_str()) {
+            return Err("duplicate receipt id".to_string());
+        }
+    }
+    Ok(())
+}
+
+fn reject_duplicate_attempt_stage<'a>(
+    record: &RuntimeRecordEnvelope,
+    existing: impl Iterator<Item = &'a RuntimeRecordEnvelope>,
+) -> Result<(), String> {
+    let Some(attempt_stage) = attempt_stage_key(record) else {
+        return Ok(());
+    };
+    for existing_record in existing {
+        if attempt_stage_key(existing_record) == Some(attempt_stage.clone()) {
+            return Err("duplicate attempt stage record".to_string());
+        }
+    }
+    Ok(())
+}
+
+fn reject_duplicate_promotion_approval_parent<'a>(
+    record: &RuntimeRecordEnvelope,
+    existing: impl Iterator<Item = &'a RuntimeRecordEnvelope>,
+) -> Result<(), String> {
+    if record.record_kind != RuntimeRecordKind::PromotionApproval {
+        return Ok(());
+    }
+    let candidate_record_id = record
+        .parent_record_ids
+        .first()
+        .ok_or_else(|| "promotion approval has no candidate parent".to_string())?;
+    for existing_record in existing {
+        if existing_record.record_kind == RuntimeRecordKind::PromotionApproval
+            && existing_record.parent_record_ids.first() == Some(candidate_record_id)
+        {
+            return Err("duplicate promotion approval for candidate".to_string());
+        }
+    }
+    Ok(())
+}
+
+fn attempt_stage_key(record: &RuntimeRecordEnvelope) -> Option<(String, RuntimeRecordKind)> {
+    match record.record_kind {
+        RuntimeRecordKind::Proposal
+        | RuntimeRecordKind::GateReceipt
+        | RuntimeRecordKind::WorkOrderReceipt
+        | RuntimeRecordKind::ExecutionReceipt
+        | RuntimeRecordKind::VerificationReceipt
+        | RuntimeRecordKind::FailureEvidence
+        | RuntimeRecordKind::VaultEntry
+        | RuntimeRecordKind::FailureObservation => record
+            .attempt_id
+            .as_ref()
+            .map(|attempt_id| (attempt_id.clone(), record.record_kind)),
+        _ => None,
+    }
 }
 
 fn reject_duplicate_confirmed_intent_receipt<'a>(
@@ -2641,6 +2720,7 @@ fn verify_semantic_record_bindings(
             if gate.receipt_id != format!("gate-{}", gate.attempt_id) {
                 return Err("gate receipt id mismatch".to_string());
             }
+            validate_gate_decision_shape(&gate)?;
             if gate.trace_id != record.trace_id
                 || gate.request_id != record.request_id
                 || Some(gate.attempt_id.as_str()) != record.attempt_id.as_deref()
@@ -2780,19 +2860,28 @@ fn verify_semantic_record_bindings(
         }
         RuntimeRecordKind::TriangulationReceipt => {
             let triangulation: TriangulationReceipt = decode_payload(record)?;
-            let parent_hashes = record
-                .parent_record_ids
-                .iter()
-                .map(|id| {
-                    by_id
-                        .get(id)
-                        .map(|parent| parent.record_hash.clone())
-                        .ok_or_else(|| "triangulation parent is missing".to_string())
-                })
-                .collect::<Result<Vec<_>, _>>()?;
+            let mut parent_hashes = Vec::new();
+            let mut parent_attempt_ids = BTreeSet::new();
+            let mut parent_vaults = Vec::new();
+            for id in &record.parent_record_ids {
+                let parent = by_id
+                    .get(id)
+                    .ok_or_else(|| "triangulation parent is missing".to_string())?;
+                let vault: VaultEntryReceipt = decode_payload(parent)?;
+                parent_hashes.push(parent.record_hash.clone());
+                parent_attempt_ids.insert(vault.attempt_id.clone());
+                parent_vaults.push(vault);
+            }
+            let parent_attempt_ids = parent_attempt_ids.into_iter().collect::<Vec<_>>();
             let expected_receipt_id = expected_triangulation_receipt_id(&triangulation)?;
             if triangulation.receipt_id != expected_receipt_id {
                 return Err("triangulation receipt id mismatch".to_string());
+            }
+            if !triangulation_sources_are_canonical(
+                &triangulation.source_vault_record_ids,
+                &triangulation.source_vault_record_hashes,
+            ) {
+                return Err("triangulation sources are not canonical".to_string());
             }
             if triangulation.status == TriangulationStatus::Isolated
                 && (triangulation.lock_signal.as_deref() == Some("unknown_lock_signal")
@@ -2810,9 +2899,11 @@ fn verify_semantic_record_bindings(
                 || triangulation.request_id != record.request_id
                 || triangulation.source_vault_record_ids != record.parent_record_ids
                 || triangulation.source_vault_record_hashes != parent_hashes
+                || triangulation.source_attempt_ids != parent_attempt_ids
             {
                 return Err("triangulation semantic binding mismatch".to_string());
             }
+            verify_triangulation_evidence_state(&triangulation, &parent_vaults)?;
         }
         RuntimeRecordKind::PromotionCandidate => {
             let candidate: ConstraintPromotionCandidateReceipt = decode_payload(record)?;
@@ -2916,6 +3007,16 @@ fn record_receipt_id(record: &RuntimeRecordEnvelope) -> Result<String, String> {
         .ok_or_else(|| format!("{:?} payload has no receipt id", record.record_kind))
 }
 
+fn maybe_record_receipt_id(record: &RuntimeRecordEnvelope) -> Result<Option<String>, String> {
+    match record.payload.get("receipt_id") {
+        Some(value) => value
+            .as_str()
+            .map(|receipt_id| Some(receipt_id.to_string()))
+            .ok_or_else(|| format!("{:?} payload has non-string receipt id", record.record_kind)),
+        None => Ok(None),
+    }
+}
+
 fn verify_acceptance_claim_bindings(
     verification: &VerificationReceipt,
     intent: &ConfirmedIntentReceipt,
@@ -2965,6 +3066,94 @@ fn verify_acceptance_claim_bindings(
         return Err("verification success flag conflicts with acceptance evidence".to_string());
     }
     Ok(())
+}
+
+fn validate_gate_decision_shape(gate: &GateReceipt) -> Result<(), String> {
+    if gate.admissible {
+        if !gate.reasons.is_empty() || !gate.blocked_by_constraint_ids.is_empty() {
+            return Err("admissible gate cannot carry block evidence".to_string());
+        }
+    } else if gate.reasons.is_empty() {
+        return Err("blocked gate must carry host rejection evidence".to_string());
+    }
+    Ok(())
+}
+
+fn verify_gate_decision_against_prior_policy(
+    gate: &GateReceipt,
+    intent: &ConfirmedIntentReceipt,
+    intent_record: &RuntimeRecordEnvelope,
+    proposal: &MethodProposal,
+    host_bounds: &HostBounds,
+    prior_records: &BTreeMap<String, RuntimeRecordEnvelope>,
+) -> Result<(), String> {
+    let intent_capability = ConfirmedIntentCapability {
+        capability_id: format!("cap-confirmed-intent-{}", intent.receipt_id),
+        receipt: intent.clone(),
+        receipt_hash: intent_record.payload_hash.clone(),
+    };
+    let active_constraints = active_promoted_constraints_from_records(prior_records)?;
+    let expected = gate_attempt_receipt(
+        &gate.trace_id,
+        &gate.attempt_id,
+        &intent_capability,
+        proposal,
+        host_bounds,
+        &active_constraints,
+    );
+    if gate.admissible != expected.admissible
+        || gate.reasons != expected.reasons
+        || gate.blocked_by_constraint_ids != expected.blocked_by_constraint_ids
+    {
+        return Err("gate decision does not match host policy".to_string());
+    }
+    Ok(())
+}
+
+fn active_promoted_constraints_from_records(
+    by_id: &BTreeMap<String, RuntimeRecordEnvelope>,
+) -> Result<Vec<PromotedConstraint>, String> {
+    let mut active = Vec::new();
+    let mut seen_approvals = BTreeSet::new();
+
+    for spend_record in by_id
+        .values()
+        .filter(|record| record.record_kind == RuntimeRecordKind::CapabilitySpend)
+    {
+        let parent_id = spend_record
+            .parent_record_ids
+            .first()
+            .ok_or_else(|| "capability spend has no parent".to_string())?;
+        let Some(approval_record) = by_id.get(parent_id) else {
+            continue;
+        };
+        if approval_record.record_kind != RuntimeRecordKind::PromotionApproval {
+            continue;
+        }
+        if !seen_approvals.insert(approval_record.record_id.clone()) {
+            continue;
+        }
+
+        let approval: PromotionApprovalReceipt = decode_payload(approval_record)?;
+        let candidate_record_id = approval_record
+            .parent_record_ids
+            .first()
+            .ok_or_else(|| "promotion approval has no candidate parent".to_string())?;
+        let candidate_record = by_id
+            .get(candidate_record_id)
+            .ok_or_else(|| "promotion approval parent is not a candidate".to_string())?;
+        if candidate_record.record_kind != RuntimeRecordKind::PromotionCandidate {
+            return Err("promotion approval parent is not a candidate".to_string());
+        }
+        let candidate: ConstraintPromotionCandidateReceipt = decode_payload(candidate_record)?;
+        active.push(promoted_constraint_from_candidate_approval(
+            &candidate,
+            &approval,
+            &approval_record.payload_hash,
+        ));
+    }
+
+    Ok(active)
 }
 
 fn verify_failure_matches_parent(
@@ -3130,6 +3319,10 @@ fn verify_parent_shape(
     parent_record_ids: &[String],
     by_id: &BTreeMap<String, RuntimeRecordEnvelope>,
 ) -> Result<(), String> {
+    let unique_parent_ids = parent_record_ids.iter().collect::<BTreeSet<_>>();
+    if unique_parent_ids.len() != parent_record_ids.len() {
+        return Err("record has duplicate parent links".to_string());
+    }
     match kind {
         RuntimeRecordKind::Request => {
             if !parent_record_ids.is_empty() {
@@ -3626,6 +3819,9 @@ fn triangulate_failures_with_id(
             return Err("failure handle is not backed by this verified journal".to_string());
         }
     }
+    reject_duplicate_failure_handles(handles)?;
+    let handles = canonical_failure_handles(handles);
+    let source_attempt_ids = source_attempt_ids_from_handles(&handles);
     if handles.len() < 2 {
         return Ok(TriangulationReceipt {
             receipt_id: triangulation_receipt_id,
@@ -3636,10 +3832,7 @@ fn triangulate_failures_with_id(
                 .iter()
                 .map(|h| h.vault_record_hash.clone())
                 .collect(),
-            source_attempt_ids: handles
-                .iter()
-                .map(|h| h.receipt.attempt_id.clone())
-                .collect(),
+            source_attempt_ids,
             status: TriangulationStatus::Open,
             lock_signal: None,
             isolated_fault_condition: None,
@@ -3660,10 +3853,7 @@ fn triangulate_failures_with_id(
                 .iter()
                 .map(|h| h.vault_record_hash.clone())
                 .collect(),
-            source_attempt_ids: handles
-                .iter()
-                .map(|h| h.receipt.attempt_id.clone())
-                .collect(),
+            source_attempt_ids,
             status: TriangulationStatus::Unresolved,
             lock_signal: None,
             isolated_fault_condition: None,
@@ -3695,7 +3885,7 @@ fn triangulate_failures_with_id(
                 .iter()
                 .map(|h| h.vault_record_hash.clone())
                 .collect(),
-            source_attempt_ids: attempts.into_iter().collect(),
+            source_attempt_ids,
             status: TriangulationStatus::Contradictory,
             lock_signal: None,
             isolated_fault_condition: None,
@@ -3712,7 +3902,7 @@ fn triangulate_failures_with_id(
                 .iter()
                 .map(|h| h.vault_record_hash.clone())
                 .collect(),
-            source_attempt_ids: attempts.into_iter().collect(),
+            source_attempt_ids,
             status: TriangulationStatus::Unresolved,
             lock_signal: None,
             isolated_fault_condition: None,
@@ -3730,7 +3920,7 @@ fn triangulate_failures_with_id(
             .iter()
             .map(|h| h.vault_record_hash.clone())
             .collect(),
-        source_attempt_ids: attempts.into_iter().collect(),
+        source_attempt_ids,
         status: TriangulationStatus::Unresolved,
         lock_signal: shared.into_iter().next(),
         isolated_fault_condition: None,
@@ -3738,6 +3928,33 @@ fn triangulate_failures_with_id(
             "shared lock signal observed, but bounded fault condition is not isolated".to_string(),
         ),
     })
+}
+
+fn canonical_failure_handles(
+    handles: &[JournalBackedFailureHandle],
+) -> Vec<&JournalBackedFailureHandle> {
+    let mut ordered = handles.iter().collect::<Vec<_>>();
+    ordered.sort_by(|left, right| left.vault_record_id.cmp(&right.vault_record_id));
+    ordered
+}
+
+fn reject_duplicate_failure_handles(handles: &[JournalBackedFailureHandle]) -> Result<(), String> {
+    let mut seen = BTreeSet::new();
+    for handle in handles {
+        if !seen.insert(handle.vault_record_id.as_str()) {
+            return Err("triangulation failure handles must be unique".to_string());
+        }
+    }
+    Ok(())
+}
+
+fn source_attempt_ids_from_handles(handles: &[&JournalBackedFailureHandle]) -> Vec<String> {
+    handles
+        .iter()
+        .map(|handle| handle.receipt.attempt_id.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 fn isolate_bounded_fault_condition(
@@ -3824,7 +4041,7 @@ fn triangulation_receipt_id(
     let sources = handles
         .iter()
         .map(|handle| (&handle.vault_record_id, &handle.vault_record_hash))
-        .collect::<Vec<_>>();
+        .collect::<BTreeMap<_, _>>();
     let hash = hash_serializable(&(
         phase,
         &journal.trace_id,
@@ -3845,7 +4062,7 @@ fn expected_triangulation_receipt_id(receipt: &TriangulationReceipt) -> Result<S
         .source_vault_record_ids
         .iter()
         .zip(receipt.source_vault_record_hashes.iter())
-        .collect::<Vec<_>>();
+        .collect::<BTreeMap<_, _>>();
     let extra = receipt.isolated_fault_condition.as_deref();
     let hash = hash_serializable(&(
         phase,
@@ -3855,6 +4072,162 @@ fn expected_triangulation_receipt_id(receipt: &TriangulationReceipt) -> Result<S
         extra,
     ))?;
     Ok(format!("triangulation-{}", &hash[..16]))
+}
+
+fn triangulation_sources_are_canonical(source_ids: &[String], source_hashes: &[String]) -> bool {
+    if source_ids.len() != source_hashes.len() {
+        return false;
+    }
+    source_ids.windows(2).all(|window| window[0] < window[1])
+}
+
+fn verify_triangulation_evidence_state(
+    triangulation: &TriangulationReceipt,
+    parent_vaults: &[VaultEntryReceipt],
+) -> Result<(), String> {
+    let derived = derive_triangulation_evidence_state(parent_vaults);
+    match triangulation.status {
+        TriangulationStatus::Open
+        | TriangulationStatus::Unresolved
+        | TriangulationStatus::Contradictory => {
+            if triangulation.status != derived.status
+                || triangulation.lock_signal != derived.lock_signal
+                || triangulation.reason != derived.reason
+                || triangulation.isolated_fault_condition.is_some()
+            {
+                return Err("triangulation evidence state mismatch".to_string());
+            }
+        }
+        TriangulationStatus::Isolated => {
+            if parent_vaults.len() < 3
+                || derived.status != TriangulationStatus::Unresolved
+                || triangulation.lock_signal != derived.lock_signal
+                || triangulation.lock_signal.as_deref() == Some("unknown_lock_signal")
+                || triangulation
+                    .isolated_fault_condition
+                    .as_deref()
+                    .map(str::trim)
+                    .unwrap_or_default()
+                    .is_empty()
+                || triangulation.reason.is_some()
+            {
+                return Err("isolated triangulation evidence state mismatch".to_string());
+            }
+        }
+        TriangulationStatus::Dormant => {
+            if triangulation.isolated_fault_condition.is_some()
+                || triangulation
+                    .reason
+                    .as_deref()
+                    .map(str::trim)
+                    .unwrap_or_default()
+                    .is_empty()
+            {
+                return Err("dormant triangulation evidence state mismatch".to_string());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn derive_triangulation_evidence_state(
+    parent_vaults: &[VaultEntryReceipt],
+) -> TriangulationReceipt {
+    let trace_id = parent_vaults
+        .first()
+        .map(|vault| vault.trace_id.clone())
+        .unwrap_or_default();
+    let request_id = parent_vaults
+        .first()
+        .map(|vault| vault.request_id.clone())
+        .unwrap_or_default();
+    let attempt_ids = parent_vaults
+        .iter()
+        .map(|vault| vault.attempt_id.clone())
+        .collect::<BTreeSet<_>>();
+
+    if parent_vaults.len() < 2 {
+        return TriangulationReceipt {
+            receipt_id: String::new(),
+            trace_id,
+            request_id,
+            source_vault_record_ids: vec![],
+            source_vault_record_hashes: vec![],
+            source_attempt_ids: vec![],
+            status: TriangulationStatus::Open,
+            lock_signal: None,
+            isolated_fault_condition: None,
+            reason: Some("triangulation requires at least two journal-backed failures".to_string()),
+        };
+    }
+    if attempt_ids.len() < 2 {
+        return TriangulationReceipt {
+            receipt_id: String::new(),
+            trace_id,
+            request_id,
+            source_vault_record_ids: vec![],
+            source_vault_record_hashes: vec![],
+            source_attempt_ids: vec![],
+            status: TriangulationStatus::Unresolved,
+            lock_signal: None,
+            isolated_fault_condition: None,
+            reason: Some("triangulation attempts are not materially different".to_string()),
+        };
+    }
+
+    let mut shared = parent_vaults[0]
+        .lock_signals
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    for vault in &parent_vaults[1..] {
+        let signals = vault.lock_signals.iter().cloned().collect::<BTreeSet<_>>();
+        shared = shared.intersection(&signals).cloned().collect();
+    }
+    if shared.is_empty() {
+        return TriangulationReceipt {
+            receipt_id: String::new(),
+            trace_id,
+            request_id,
+            source_vault_record_ids: vec![],
+            source_vault_record_hashes: vec![],
+            source_attempt_ids: vec![],
+            status: TriangulationStatus::Contradictory,
+            lock_signal: None,
+            isolated_fault_condition: None,
+            reason: Some("triangulation evidence conflicts; no shared lock point".to_string()),
+        };
+    }
+    if shared.len() != 1 {
+        return TriangulationReceipt {
+            receipt_id: String::new(),
+            trace_id,
+            request_id,
+            source_vault_record_ids: vec![],
+            source_vault_record_hashes: vec![],
+            source_attempt_ids: vec![],
+            status: TriangulationStatus::Unresolved,
+            lock_signal: None,
+            isolated_fault_condition: None,
+            reason: Some(
+                "triangulation evidence did not narrow to one shared lock point".to_string(),
+            ),
+        };
+    }
+    TriangulationReceipt {
+        receipt_id: String::new(),
+        trace_id,
+        request_id,
+        source_vault_record_ids: vec![],
+        source_vault_record_hashes: vec![],
+        source_attempt_ids: vec![],
+        status: TriangulationStatus::Unresolved,
+        lock_signal: shared.into_iter().next(),
+        isolated_fault_condition: None,
+        reason: Some(
+            "shared lock signal observed, but bounded fault condition is not isolated".to_string(),
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -4323,19 +4696,19 @@ mod tests {
         journal: &RuntimeJournal,
         intent: &ConfirmedIntentCapability,
     ) -> (String, String, String) {
-        let (vault_a, handle_a) = append_attempt_failure(
+        let (_vault_a, handle_a) = append_attempt_failure(
             journal,
             "attempt-1",
             intent,
             &proposal("proposal-a", "README.md", "wrong-a"),
         );
-        let (vault_b, handle_b) = append_attempt_failure(
+        let (_vault_b, handle_b) = append_attempt_failure(
             journal,
             "attempt-2",
             intent,
             &proposal("proposal-b", "README.md", "wrong-b"),
         );
-        let (vault_c, handle_c) = append_attempt_failure(
+        let (_vault_c, handle_c) = append_attempt_failure(
             journal,
             "attempt-3",
             intent,
@@ -4347,8 +4720,9 @@ mod tests {
             "exact write to README.md repeatedly fails acceptance despite materially different attempts",
         )
         .unwrap();
+        let parent_vault_record_ids = tri.source_vault_record_ids.clone();
         let tri_record = journal
-            .append_triangulation_receipt(vec![vault_a, vault_b, vault_c], &tri)
+            .append_triangulation_receipt(parent_vault_record_ids, &tri)
             .unwrap();
         let candidate = candidate_from_triangulation(&tri, tri_record.payload_hash).unwrap();
         let candidate_record = journal
@@ -4569,19 +4943,19 @@ mod tests {
         );
         let allowed = journal.issue_allowed_attempt(&intent, &method).unwrap();
         let gate_record_id = allowed.gate_record_id.clone();
-        let (vault_a, handle_a) = append_attempt_failure(
+        let (_vault_a, handle_a) = append_attempt_failure(
             &journal,
             "attempt-2",
             &intent,
             &proposal("proposal-b", "README.md", "wrong-a"),
         );
-        let (vault_b, handle_b) = append_attempt_failure(
+        let (_vault_b, handle_b) = append_attempt_failure(
             &journal,
             "attempt-3",
             &intent,
             &proposal("proposal-c", "README.md", "wrong-b"),
         );
-        let (vault_c, handle_c) = append_attempt_failure(
+        let (_vault_c, handle_c) = append_attempt_failure(
             &journal,
             "attempt-4",
             &intent,
@@ -4594,7 +4968,7 @@ mod tests {
         )
         .unwrap();
         let tri_record = journal
-            .append_triangulation_receipt(vec![vault_a, vault_b, vault_c], &tri)
+            .append_triangulation_receipt(tri.source_vault_record_ids.clone(), &tri)
             .unwrap();
         let candidate = candidate_from_triangulation(&tri, tri_record.payload_hash).unwrap();
         let candidate_record = journal
@@ -4807,13 +5181,13 @@ mod tests {
             "request-1",
             bounds(Path::new(".")),
         );
-        let (vault_a, handle_a) = append_attempt_failure(
+        let (_vault_a, handle_a) = append_attempt_failure(
             &journal,
             "attempt-1",
             &intent,
             &proposal("proposal-a", "README.md", "wrong-a"),
         );
-        let (vault_b, handle_b) = append_attempt_failure(
+        let (_vault_b, handle_b) = append_attempt_failure(
             &journal,
             "attempt-2",
             &intent,
@@ -4826,16 +5200,12 @@ mod tests {
             triangulation_record.record_kind(),
             RuntimeRecordKind::TriangulationReceipt
         );
-        assert_eq!(
-            triangulation_record.parent_record_ids(),
-            &[vault_a.clone(), vault_b.clone()]
-        );
         let triangulation: TriangulationReceipt =
             serde_json::from_value(triangulation_record.payload().clone()).unwrap();
         assert_eq!(triangulation.status, TriangulationStatus::Unresolved);
         assert_eq!(
-            triangulation.source_vault_record_ids(),
-            &[vault_a.clone(), vault_b.clone()]
+            triangulation_record.parent_record_ids(),
+            triangulation.source_vault_record_ids()
         );
         assert_eq!(triangulation.lock_signal(), Some("write:README.md"));
         let records = journal.verify().unwrap();
@@ -4848,7 +5218,151 @@ mod tests {
     }
 
     #[test]
+    fn triangulation_rejects_duplicate_failure_parent_without_append() {
+        let runtime = tempfile::tempdir().unwrap();
+        let intent = intent();
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
+        let (_vault_a, handle_a) = append_attempt_failure(
+            &journal,
+            "attempt-1",
+            &intent,
+            &proposal("proposal-a", "README.md", "wrong-a"),
+        );
+        let handle_a_reissued = journal
+            .reissue_failure_handle(&handle_a.vault_record_id)
+            .unwrap();
+        let (_vault_b, handle_b) = append_attempt_failure(
+            &journal,
+            "attempt-2",
+            &intent,
+            &proposal("proposal-b", "README.md", "wrong-b"),
+        );
+        let before = journal.verify().unwrap().len();
+
+        let err = journal
+            .record_triangulation(&[handle_a, handle_a_reissued, handle_b])
+            .unwrap_err();
+
+        assert!(err.contains("triangulation failure handles must be unique"));
+        assert_eq!(journal.verify().unwrap().len(), before);
+    }
+
+    #[test]
+    fn triangulate_failures_rejects_duplicate_failure_handles() {
+        let runtime = tempfile::tempdir().unwrap();
+        let intent = intent();
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
+        let (_vault_a, handle_a) = append_attempt_failure(
+            &journal,
+            "attempt-1",
+            &intent,
+            &proposal("proposal-a", "README.md", "wrong-a"),
+        );
+        let handle_a_reissued = journal
+            .reissue_failure_handle(&handle_a.vault_record_id)
+            .unwrap();
+
+        let err = triangulate_failures(&journal, &[handle_a, handle_a_reissued]).unwrap_err();
+
+        assert!(err.contains("triangulation failure handles must be unique"));
+    }
+
+    #[test]
+    fn persisted_duplicate_parent_links_fail_journal_verification() {
+        let runtime = tempfile::tempdir().unwrap();
+        let intent = intent();
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
+        let (_vault_a, handle_a) = append_attempt_failure(
+            &journal,
+            "attempt-1",
+            &intent,
+            &proposal("proposal-a", "README.md", "wrong-a"),
+        );
+        let (_vault_b, handle_b) = append_attempt_failure(
+            &journal,
+            "attempt-2",
+            &intent,
+            &proposal("proposal-b", "README.md", "wrong-b"),
+        );
+        journal.record_triangulation(&[handle_a, handle_b]).unwrap();
+
+        let mut records = journal.verify().unwrap();
+        let triangulation = records
+            .iter_mut()
+            .find(|record| record.record_kind == RuntimeRecordKind::TriangulationReceipt)
+            .unwrap();
+        let duplicated_parent = triangulation.parent_record_ids[0].clone();
+        triangulation.parent_record_ids.push(duplicated_parent);
+        rehash_record(triangulation);
+        write_records_and_head(runtime.path(), &records);
+
+        assert!(journal
+            .verify()
+            .unwrap_err()
+            .contains("duplicate parent links"));
+    }
+
+    #[test]
     fn record_triangulation_rejects_duplicate_evidence_state() {
+        let runtime = tempfile::tempdir().unwrap();
+        let intent = intent();
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
+        let (_vault_a, handle_a) = append_attempt_failure(
+            &journal,
+            "attempt-1",
+            &intent,
+            &proposal("proposal-a", "README.md", "wrong-a"),
+        );
+        let (_vault_b, handle_b) = append_attempt_failure(
+            &journal,
+            "attempt-2",
+            &intent,
+            &proposal("proposal-b", "README.md", "wrong-b"),
+        );
+
+        let vault_a_id = handle_a.vault_record_id.clone();
+        let vault_b_id = handle_b.vault_record_id.clone();
+        journal.record_triangulation(&[handle_a, handle_b]).unwrap();
+
+        let handle_a = journal.reissue_failure_handle(&vault_a_id).unwrap();
+        let handle_b = journal.reissue_failure_handle(&vault_b_id).unwrap();
+        let err = journal
+            .record_triangulation(&[handle_a, handle_b])
+            .unwrap_err();
+
+        assert!(err.contains("triangulation already exists"));
+        let records = journal.verify().unwrap();
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| record.record_kind == RuntimeRecordKind::TriangulationReceipt)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn record_triangulation_rejects_reordered_duplicate_evidence_state() {
         let runtime = tempfile::tempdir().unwrap();
         let intent = intent();
         let journal = RuntimeJournal::new(
@@ -4869,24 +5383,239 @@ mod tests {
             &intent,
             &proposal("proposal-b", "README.md", "wrong-b"),
         );
-
         journal.record_triangulation(&[handle_a, handle_b]).unwrap();
 
         let handle_a = journal.reissue_failure_handle(&vault_a).unwrap();
         let handle_b = journal.reissue_failure_handle(&vault_b).unwrap();
         let err = journal
-            .record_triangulation(&[handle_a, handle_b])
+            .record_triangulation(&[handle_b, handle_a])
             .unwrap_err();
 
         assert!(err.contains("triangulation already exists"));
-        let records = journal.verify().unwrap();
         assert_eq!(
-            records
+            journal
+                .verify()
+                .unwrap()
                 .iter()
                 .filter(|record| record.record_kind == RuntimeRecordKind::TriangulationReceipt)
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn persisted_noncanonical_triangulation_sources_fail_journal_verification() {
+        let runtime = tempfile::tempdir().unwrap();
+        let intent = intent();
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
+        let (_vault_a, handle_a) = append_attempt_failure(
+            &journal,
+            "attempt-1",
+            &intent,
+            &proposal("proposal-a", "README.md", "wrong-a"),
+        );
+        let (_vault_b, handle_b) = append_attempt_failure(
+            &journal,
+            "attempt-2",
+            &intent,
+            &proposal("proposal-b", "README.md", "wrong-b"),
+        );
+        journal.record_triangulation(&[handle_a, handle_b]).unwrap();
+
+        let mut records = journal.verify().unwrap();
+        let triangulation_record = records
+            .iter_mut()
+            .find(|record| record.record_kind == RuntimeRecordKind::TriangulationReceipt)
+            .unwrap();
+        triangulation_record.parent_record_ids.reverse();
+        let mut triangulation: TriangulationReceipt =
+            serde_json::from_value(triangulation_record.payload.clone()).unwrap();
+        triangulation.source_vault_record_ids.reverse();
+        triangulation.source_vault_record_hashes.reverse();
+        triangulation_record.payload = serde_json::to_value(triangulation).unwrap();
+        rehash_record(triangulation_record);
+        write_records_and_head(runtime.path(), &records);
+
+        assert!(journal
+            .verify()
+            .unwrap_err()
+            .contains("triangulation sources are not canonical"));
+    }
+
+    #[test]
+    fn triangulation_source_attempt_ids_must_match_parent_vaults_without_append() {
+        let runtime = tempfile::tempdir().unwrap();
+        let intent = intent();
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
+        let (_vault_a, handle_a) = append_attempt_failure(
+            &journal,
+            "attempt-1",
+            &intent,
+            &proposal("proposal-a", "README.md", "wrong-a"),
+        );
+        let (_vault_b, handle_b) = append_attempt_failure(
+            &journal,
+            "attempt-2",
+            &intent,
+            &proposal("proposal-b", "README.md", "wrong-b"),
+        );
+        let mut triangulation = triangulate_failures(&journal, &[handle_a, handle_b]).unwrap();
+        triangulation.source_attempt_ids = vec!["caller-forged-attempt".to_string()];
+        let before = journal.verify().unwrap().len();
+
+        let err = journal
+            .append_triangulation_receipt(
+                triangulation.source_vault_record_ids.clone(),
+                &triangulation,
+            )
+            .unwrap_err();
+
+        assert!(err.contains("triangulation semantic binding mismatch"));
+        assert_eq!(journal.verify().unwrap().len(), before);
+    }
+
+    #[test]
+    fn persisted_forged_triangulation_source_attempt_ids_fail_verification() {
+        let runtime = tempfile::tempdir().unwrap();
+        let intent = intent();
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
+        let (_vault_a, handle_a) = append_attempt_failure(
+            &journal,
+            "attempt-1",
+            &intent,
+            &proposal("proposal-a", "README.md", "wrong-a"),
+        );
+        let (_vault_b, handle_b) = append_attempt_failure(
+            &journal,
+            "attempt-2",
+            &intent,
+            &proposal("proposal-b", "README.md", "wrong-b"),
+        );
+        journal.record_triangulation(&[handle_a, handle_b]).unwrap();
+
+        let mut records = journal.verify().unwrap();
+        let triangulation_record = records
+            .iter_mut()
+            .find(|record| record.record_kind == RuntimeRecordKind::TriangulationReceipt)
+            .unwrap();
+        let mut triangulation: TriangulationReceipt =
+            serde_json::from_value(triangulation_record.payload.clone()).unwrap();
+        triangulation.source_attempt_ids = vec!["caller-forged-attempt".to_string()];
+        triangulation_record.payload = serde_json::to_value(triangulation).unwrap();
+        rehash_record(triangulation_record);
+        write_records_and_head(runtime.path(), &records);
+
+        assert!(journal
+            .verify()
+            .unwrap_err()
+            .contains("triangulation semantic binding mismatch"));
+    }
+
+    #[test]
+    fn triangulation_status_and_lock_must_match_parent_evidence_without_append() {
+        let runtime = tempfile::tempdir().unwrap();
+        let intent = intent();
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
+        let (_vault_a, handle_a) = append_attempt_failure_with_lock(
+            &journal,
+            "attempt-1",
+            &intent,
+            &proposal("proposal-a", "alpha.md", "wrong-a"),
+            Some("write:alpha.md".to_string()),
+        );
+        let (_vault_b, handle_b) = append_attempt_failure_with_lock(
+            &journal,
+            "attempt-2",
+            &intent,
+            &proposal("proposal-b", "beta.md", "wrong-b"),
+            Some("write:beta.md".to_string()),
+        );
+        let mut triangulation = triangulate_failures(&journal, &[handle_a, handle_b]).unwrap();
+        assert_eq!(triangulation.status, TriangulationStatus::Contradictory);
+        triangulation.status = TriangulationStatus::Unresolved;
+        triangulation.lock_signal = Some("write:README.md".to_string());
+        triangulation.reason = Some(
+            "shared lock signal observed, but bounded fault condition is not isolated".to_string(),
+        );
+        let before = journal.verify().unwrap().len();
+
+        let err = journal
+            .append_triangulation_receipt(
+                triangulation.source_vault_record_ids.clone(),
+                &triangulation,
+            )
+            .unwrap_err();
+
+        assert!(err.contains("triangulation evidence state mismatch"));
+        assert_eq!(journal.verify().unwrap().len(), before);
+    }
+
+    #[test]
+    fn persisted_forged_triangulation_evidence_state_fails_verification() {
+        let runtime = tempfile::tempdir().unwrap();
+        let intent = intent();
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
+        let (_vault_a, handle_a) = append_attempt_failure_with_lock(
+            &journal,
+            "attempt-1",
+            &intent,
+            &proposal("proposal-a", "alpha.md", "wrong-a"),
+            Some("write:alpha.md".to_string()),
+        );
+        let (_vault_b, handle_b) = append_attempt_failure_with_lock(
+            &journal,
+            "attempt-2",
+            &intent,
+            &proposal("proposal-b", "beta.md", "wrong-b"),
+            Some("write:beta.md".to_string()),
+        );
+        journal.record_triangulation(&[handle_a, handle_b]).unwrap();
+
+        let mut records = journal.verify().unwrap();
+        let triangulation_record = records
+            .iter_mut()
+            .find(|record| record.record_kind == RuntimeRecordKind::TriangulationReceipt)
+            .unwrap();
+        let mut triangulation: TriangulationReceipt =
+            serde_json::from_value(triangulation_record.payload.clone()).unwrap();
+        triangulation.status = TriangulationStatus::Unresolved;
+        triangulation.lock_signal = Some("write:README.md".to_string());
+        triangulation.reason = Some(
+            "shared lock signal observed, but bounded fault condition is not isolated".to_string(),
+        );
+        triangulation_record.payload = serde_json::to_value(triangulation).unwrap();
+        rehash_record(triangulation_record);
+        write_records_and_head(runtime.path(), &records);
+
+        assert!(journal
+            .verify()
+            .unwrap_err()
+            .contains("triangulation evidence state mismatch"));
     }
 
     #[test]
@@ -4974,19 +5703,19 @@ mod tests {
             "request-1",
             bounds(Path::new(".")),
         );
-        let (vault_a, handle_a) = append_attempt_failure(
+        let (_vault_a, handle_a) = append_attempt_failure(
             &journal,
             "attempt-1",
             &intent,
             &proposal("proposal-a", "README.md", "wrong-a"),
         );
-        let (vault_b, handle_b) = append_attempt_failure(
+        let (_vault_b, handle_b) = append_attempt_failure(
             &journal,
             "attempt-2",
             &intent,
             &proposal("proposal-b", "README.md", "wrong-b"),
         );
-        let (vault_c, handle_c) = append_attempt_failure(
+        let (_vault_c, handle_c) = append_attempt_failure(
             &journal,
             "attempt-3",
             &intent,
@@ -5000,7 +5729,7 @@ mod tests {
         .unwrap();
         assert_eq!(tri.status, TriangulationStatus::Isolated);
         let tri_record = journal
-            .append_triangulation_receipt(vec![vault_a, vault_b, vault_c], &tri)
+            .append_triangulation_receipt(tri.source_vault_record_ids.clone(), &tri)
             .unwrap();
         let candidate = candidate_from_triangulation(&tri, tri_record.payload_hash).unwrap();
         let candidate_record = journal
@@ -5068,10 +5797,6 @@ mod tests {
             RuntimeRecordKind::PromotionCandidate
         );
         assert_eq!(
-            triangulation_record.parent_record_ids(),
-            &[vault_a, vault_b, vault_c]
-        );
-        assert_eq!(
             candidate_record.parent_record_ids(),
             &[triangulation_record.record_id().to_string()]
         );
@@ -5079,6 +5804,13 @@ mod tests {
             serde_json::from_value(triangulation_record.payload().clone()).unwrap();
         let candidate: ConstraintPromotionCandidateReceipt =
             serde_json::from_value(candidate_record.payload().clone()).unwrap();
+        assert_eq!(
+            triangulation_record.parent_record_ids(),
+            triangulation.source_vault_record_ids()
+        );
+        assert!(triangulation.source_vault_record_ids().contains(&vault_a));
+        assert!(triangulation.source_vault_record_ids().contains(&vault_b));
+        assert!(triangulation.source_vault_record_ids().contains(&vault_c));
         assert_eq!(triangulation.status(), &TriangulationStatus::Isolated);
         assert_eq!(
             candidate.triangulation_receipt_hash(),
@@ -5298,7 +6030,10 @@ mod tests {
         triangulation.receipt_id = expected_triangulation_receipt_id(&triangulation).unwrap();
 
         assert!(journal
-            .append_triangulation_receipt(vault_ids, &triangulation)
+            .append_triangulation_receipt(
+                triangulation.source_vault_record_ids.clone(),
+                &triangulation
+            )
             .unwrap_err()
             .contains("isolated triangulation semantic binding mismatch"));
     }
@@ -5712,7 +6447,7 @@ mod tests {
             runtime.path(),
             "trace-1",
             "request-1",
-            bounds(Path::new(".")),
+            HostBounds::new(Path::new("."), 0, 4096),
         );
         let (approval_record_id, _candidate_record_id, _candidate_hash) =
             append_isolated_candidate_approval(&journal, &intent);
@@ -5766,6 +6501,121 @@ mod tests {
             .append_gate_receipt(proposal_record.record_id, &forged_gate)
             .unwrap_err()
             .contains("gate receipt semantic binding mismatch"));
+    }
+
+    #[test]
+    fn gate_decision_shape_is_enforced_without_append() {
+        let runtime = tempfile::tempdir().unwrap();
+        let intent = intent();
+        let method = proposal("proposal-a", "README.md", "hello");
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
+        let request = journal
+            .append_request(&intent.receipt().exact_request)
+            .unwrap();
+        let confirmed = journal
+            .append_confirmed_intent_receipt(request.record_id, &intent)
+            .unwrap();
+        let proposal_record = journal
+            .append_proposal("attempt-1", confirmed.record_id, &method)
+            .unwrap();
+        let mut forged_gate = gate_attempt_receipt(
+            "trace-1",
+            "attempt-1",
+            &intent,
+            &method,
+            &journal.host_bounds,
+            &[],
+        );
+        forged_gate.admissible = true;
+        forged_gate
+            .reasons
+            .push("caller tried to keep block evidence on an allowed gate".to_string());
+        let before = journal.verify().unwrap().len();
+
+        let err = journal
+            .append_gate_receipt(proposal_record.record_id, &forged_gate)
+            .unwrap_err();
+
+        assert!(err.contains("admissible gate cannot carry block evidence"));
+        assert_eq!(journal.verify().unwrap().len(), before);
+    }
+
+    #[test]
+    fn persisted_forged_gate_decision_shape_fails_verification() {
+        let runtime = tempfile::tempdir().unwrap();
+        let intent = intent();
+        let method = proposal("proposal-a", "README.md", "hello");
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
+        journal.issue_allowed_attempt(&intent, &method).unwrap();
+
+        let mut records = journal.verify().unwrap();
+        let gate_record = records
+            .iter_mut()
+            .find(|record| record.record_kind == RuntimeRecordKind::GateReceipt)
+            .unwrap();
+        let mut gate: GateReceipt = serde_json::from_value(gate_record.payload.clone()).unwrap();
+        gate.reasons
+            .push("caller tried to keep block evidence on an allowed gate".to_string());
+        gate_record.payload = serde_json::to_value(gate).unwrap();
+        rehash_record(gate_record);
+        write_records_and_head(runtime.path(), &records);
+
+        assert!(journal
+            .verify()
+            .unwrap_err()
+            .contains("admissible gate cannot carry block evidence"));
+    }
+
+    #[test]
+    fn gate_decision_must_match_host_policy_without_append() {
+        let runtime = tempfile::tempdir().unwrap();
+        let intent = intent();
+        let method = proposal("proposal-a", "README.md", "hello");
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            HostBounds::new(Path::new("."), 0, 4096),
+        );
+        let request = journal
+            .append_request(&intent.receipt().exact_request)
+            .unwrap();
+        let confirmed = journal
+            .append_confirmed_intent_receipt(request.record_id, &intent)
+            .unwrap();
+        let proposal_record = journal
+            .append_proposal("attempt-1", confirmed.record_id, &method)
+            .unwrap();
+        let mut forged_gate = gate_attempt_receipt(
+            "trace-1",
+            "attempt-1",
+            &intent,
+            &method,
+            &journal.host_bounds,
+            &[],
+        );
+        assert!(!forged_gate.admissible);
+        forged_gate.admissible = true;
+        forged_gate.reasons.clear();
+        forged_gate.blocked_by_constraint_ids.clear();
+        let before = journal.verify().unwrap().len();
+
+        let err = journal
+            .append_gate_receipt(proposal_record.record_id, &forged_gate)
+            .unwrap_err();
+
+        assert!(err.contains("gate decision does not match host policy"));
+        assert_eq!(journal.verify().unwrap().len(), before);
     }
 
     #[test]
@@ -6322,6 +7172,199 @@ mod tests {
             .verify()
             .unwrap_err()
             .contains("duplicate confirmed intent receipt"));
+    }
+
+    #[test]
+    fn duplicate_promotion_approval_receipt_id_is_rejected_without_append() {
+        let runtime = tempfile::tempdir().unwrap();
+        let intent = intent();
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
+        let (approval_record_id, candidate_record_id, _candidate_hash) =
+            append_isolated_candidate_approval(&journal, &intent);
+        let records = journal.verify().unwrap();
+        let approval_record = find_record(&records, &approval_record_id).unwrap();
+        let approval: PromotionApprovalReceipt = decode_payload(approval_record).unwrap();
+        let before = journal.verify().unwrap().len();
+
+        let err = journal
+            .append_promotion_approval(candidate_record_id, &approval)
+            .unwrap_err();
+
+        assert!(err.contains("duplicate receipt id"));
+        assert_eq!(journal.verify().unwrap().len(), before);
+    }
+
+    #[test]
+    fn duplicate_promotion_approval_parent_is_rejected_without_append() {
+        let runtime = tempfile::tempdir().unwrap();
+        let intent = intent();
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
+        let (_approval_record_id, candidate_record_id, _candidate_hash) =
+            append_isolated_candidate_approval(&journal, &intent);
+        let records = journal.verify().unwrap();
+        let candidate_record = find_record(&records, &candidate_record_id).unwrap();
+        let candidate: ConstraintPromotionCandidateReceipt =
+            decode_payload(candidate_record).unwrap();
+        let second_approval = approve_promotion_receipt(
+            &candidate,
+            candidate_record.payload_hash.clone(),
+            external_operator_assertion("second-operator"),
+        )
+        .unwrap();
+        let before = records.len();
+
+        let err = journal
+            .append_promotion_approval(candidate_record_id, &second_approval)
+            .unwrap_err();
+
+        assert!(err.contains("duplicate promotion approval for candidate"));
+        assert_eq!(journal.verify().unwrap().len(), before);
+    }
+
+    #[test]
+    fn persisted_duplicate_promotion_approval_parent_fails_journal_verification() {
+        let runtime = tempfile::tempdir().unwrap();
+        let intent = intent();
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
+        let (approval_record_id, candidate_record_id, _candidate_hash) =
+            append_isolated_candidate_approval(&journal, &intent);
+        let mut records = journal.verify().unwrap();
+        let candidate_record = find_record(&records, &candidate_record_id).unwrap().clone();
+        let candidate: ConstraintPromotionCandidateReceipt =
+            decode_payload(&candidate_record).unwrap();
+        let second_approval = approve_promotion_receipt(
+            &candidate,
+            candidate_record.payload_hash.clone(),
+            external_operator_assertion("second-operator"),
+        )
+        .unwrap();
+        let mut duplicate = find_record(&records, &approval_record_id).unwrap().clone();
+        duplicate.sequence_number = records.len() as u64;
+        duplicate.record_id = expected_record_id(
+            RuntimeRecordKind::PromotionApproval,
+            duplicate.sequence_number,
+        );
+        duplicate.previous_record_hash = records.last().map(|record| record.record_hash.clone());
+        duplicate.payload = serde_json::to_value(second_approval).unwrap();
+        rehash_record(&mut duplicate);
+        records.push(duplicate);
+        write_records_and_head(runtime.path(), &records);
+
+        assert!(journal
+            .verify()
+            .unwrap_err()
+            .contains("duplicate promotion approval for candidate"));
+    }
+
+    #[test]
+    fn duplicate_attempt_proposal_stage_is_rejected_without_append() {
+        let runtime = tempfile::tempdir().unwrap();
+        let intent = intent();
+        let method = proposal("proposal-a", "README.md", "hello");
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
+        journal.issue_allowed_attempt(&intent, &method).unwrap();
+        let confirmed_record = journal
+            .verify()
+            .unwrap()
+            .into_iter()
+            .find(|record| record.record_kind == RuntimeRecordKind::ConfirmedIntentReceipt)
+            .unwrap();
+        let before = journal.verify().unwrap().len();
+
+        let err = journal
+            .append_proposal("attempt-1", confirmed_record.record_id, &method)
+            .unwrap_err();
+
+        assert!(err.contains("duplicate attempt stage record"));
+        assert_eq!(journal.verify().unwrap().len(), before);
+    }
+
+    #[test]
+    fn persisted_duplicate_attempt_proposal_stage_fails_journal_verification() {
+        let runtime = tempfile::tempdir().unwrap();
+        let intent = intent();
+        let method = proposal("proposal-a", "README.md", "hello");
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
+        journal.issue_allowed_attempt(&intent, &method).unwrap();
+
+        let mut records = journal.verify().unwrap();
+        let proposal_record = records
+            .iter()
+            .find(|record| record.record_kind == RuntimeRecordKind::Proposal)
+            .unwrap()
+            .clone();
+        let mut duplicate = proposal_record;
+        duplicate.sequence_number = records.len() as u64;
+        duplicate.record_id =
+            expected_record_id(RuntimeRecordKind::Proposal, duplicate.sequence_number);
+        duplicate.previous_record_hash = records.last().map(|record| record.record_hash.clone());
+        rehash_record(&mut duplicate);
+        records.push(duplicate);
+        write_records_and_head(runtime.path(), &records);
+
+        assert!(journal
+            .verify()
+            .unwrap_err()
+            .contains("duplicate attempt stage record"));
+    }
+
+    #[test]
+    fn persisted_duplicate_gate_receipt_id_fails_journal_verification() {
+        let runtime = tempfile::tempdir().unwrap();
+        let intent = intent();
+        let method = proposal("proposal-a", "README.md", "hello");
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(Path::new(".")),
+        );
+        journal.issue_allowed_attempt(&intent, &method).unwrap();
+
+        let mut records = journal.verify().unwrap();
+        let gate = records
+            .iter()
+            .find(|record| record.record_kind == RuntimeRecordKind::GateReceipt)
+            .unwrap()
+            .clone();
+        let mut duplicate = gate;
+        duplicate.sequence_number = records.len() as u64;
+        duplicate.record_id =
+            expected_record_id(RuntimeRecordKind::GateReceipt, duplicate.sequence_number);
+        duplicate.previous_record_hash = records.last().map(|record| record.record_hash.clone());
+        rehash_record(&mut duplicate);
+        records.push(duplicate);
+        write_records_and_head(runtime.path(), &records);
+
+        assert!(journal
+            .verify()
+            .unwrap_err()
+            .contains("duplicate receipt id"));
     }
 
     #[test]
@@ -7025,7 +8068,7 @@ mod tests {
             runtime.path(),
             "trace-1",
             "request-1",
-            bounds(Path::new(".")),
+            HostBounds::new(Path::new("."), 0, 4096),
         );
         let request = journal
             .append_request(&intent.receipt().exact_request)
@@ -7036,16 +8079,14 @@ mod tests {
         let proposal_record = journal
             .append_proposal("attempt-1", confirmed.record_id, &method)
             .unwrap();
-        let mut gate = gate_attempt_receipt(
+        let gate = gate_attempt_receipt(
             "trace-1",
             "attempt-1",
             &intent,
             &method,
-            &bounds(Path::new(".")),
+            &journal.host_bounds,
             &[],
         );
-        gate.admissible = false;
-        gate.reasons = vec!["host rejected method".to_string()];
         let gate_record = journal
             .append_gate_receipt(proposal_record.record_id, &gate)
             .unwrap();
@@ -7074,7 +8115,7 @@ mod tests {
             runtime.path(),
             "trace-1",
             "request-1",
-            bounds(Path::new(".")),
+            HostBounds::new(Path::new("."), 0, 4096),
         );
         let request = journal
             .append_request(&intent.receipt().exact_request)
@@ -7085,16 +8126,14 @@ mod tests {
         let proposal_record = journal
             .append_proposal("attempt-1", confirmed.record_id, &method)
             .unwrap();
-        let mut gate = gate_attempt_receipt(
+        let gate = gate_attempt_receipt(
             "trace-1",
             "attempt-1",
             &intent,
             &method,
-            &bounds(Path::new(".")),
+            &journal.host_bounds,
             &[],
         );
-        gate.admissible = false;
-        gate.reasons = vec!["host rejected method".to_string()];
         let gate_record = journal
             .append_gate_receipt(proposal_record.record_id, &gate)
             .unwrap();
