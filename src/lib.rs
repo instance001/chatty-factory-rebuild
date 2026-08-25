@@ -1185,6 +1185,239 @@ pub enum EfRescueAttemptOutcome {
     },
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BuildStepSpec {
+    step_id: String,
+    instruction: String,
+    acceptance_criteria: Vec<String>,
+}
+
+impl BuildStepSpec {
+    pub fn new(
+        step_id: impl Into<String>,
+        instruction: impl Into<String>,
+        acceptance_criteria: Vec<String>,
+    ) -> Self {
+        Self {
+            step_id: step_id.into(),
+            instruction: instruction.into(),
+            acceptance_criteria,
+        }
+    }
+
+    pub fn step_id(&self) -> &str {
+        &self.step_id
+    }
+
+    pub fn instruction(&self) -> &str {
+        &self.instruction
+    }
+
+    pub fn acceptance_criteria(&self) -> &[String] {
+        &self.acceptance_criteria
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BuildPlan {
+    plan_id: String,
+    exact_request: ExactRequest,
+    steps: Vec<BuildStepSpec>,
+}
+
+impl BuildPlan {
+    pub fn new(
+        plan_id: impl Into<String>,
+        exact_request: ExactRequest,
+        steps: Vec<BuildStepSpec>,
+    ) -> Result<Self, String> {
+        let plan = Self {
+            plan_id: plan_id.into(),
+            exact_request,
+            steps,
+        };
+        plan.validate()?;
+        Ok(plan)
+    }
+
+    pub fn plan_id(&self) -> &str {
+        &self.plan_id
+    }
+
+    pub fn exact_request(&self) -> &ExactRequest {
+        &self.exact_request
+    }
+
+    pub fn steps(&self) -> &[BuildStepSpec] {
+        &self.steps
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        self.exact_request.validate_self()?;
+        if self.steps.is_empty() {
+            return Err("build plan requires at least one step".to_string());
+        }
+        let mut seen = BTreeSet::new();
+        for step in &self.steps {
+            if step.step_id.trim().is_empty() {
+                return Err("build step id must be non-empty".to_string());
+            }
+            if !seen.insert(step.step_id.as_str()) {
+                return Err(format!("duplicate build step id '{}'", step.step_id));
+            }
+            if step.instruction.trim().is_empty() {
+                return Err(format!(
+                    "build step '{}' instruction must be non-empty",
+                    step.step_id
+                ));
+            }
+            if step.acceptance_criteria.is_empty() {
+                return Err(format!(
+                    "build step '{}' requires at least one acceptance criterion",
+                    step.step_id
+                ));
+            }
+            for criterion in &step.acceptance_criteria {
+                if criterion.trim().is_empty() {
+                    return Err(format!(
+                        "build step '{}' acceptance criterion must be non-empty",
+                        step.step_id
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BuildRunLimits {
+    max_attempts_per_step: usize,
+}
+
+impl BuildRunLimits {
+    pub fn new(max_attempts_per_step: usize) -> Result<Self, String> {
+        if max_attempts_per_step == 0 {
+            return Err("max attempts per step must be at least one".to_string());
+        }
+        Ok(Self {
+            max_attempts_per_step,
+        })
+    }
+
+    pub fn max_attempts_per_step(&self) -> usize {
+        self.max_attempts_per_step
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BuildFailureContext {
+    step_id: String,
+    attempt_number: usize,
+    failure_class: FailureClass,
+    evidence: Vec<String>,
+    gate_reasons: Vec<String>,
+    lock_signals: Vec<String>,
+}
+
+impl BuildFailureContext {
+    pub fn step_id(&self) -> &str {
+        &self.step_id
+    }
+
+    pub fn attempt_number(&self) -> usize {
+        self.attempt_number
+    }
+
+    pub fn failure_class(&self) -> &FailureClass {
+        &self.failure_class
+    }
+
+    pub fn evidence(&self) -> &[String] {
+        &self.evidence
+    }
+
+    pub fn gate_reasons(&self) -> &[String] {
+        &self.gate_reasons
+    }
+
+    pub fn lock_signals(&self) -> &[String] {
+        &self.lock_signals
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BuildProposalContext {
+    plan_id: String,
+    step_index: usize,
+    step: BuildStepSpec,
+    prior_failures: Vec<BuildFailureContext>,
+}
+
+impl BuildProposalContext {
+    pub fn plan_id(&self) -> &str {
+        &self.plan_id
+    }
+
+    pub fn step_index(&self) -> usize {
+        self.step_index
+    }
+
+    pub fn step(&self) -> &BuildStepSpec {
+        &self.step
+    }
+
+    pub fn prior_failures(&self) -> &[BuildFailureContext] {
+        &self.prior_failures
+    }
+}
+
+pub trait BuildProposalProvider {
+    fn propose(&mut self, context: &BuildProposalContext) -> Result<MethodProposal, String>;
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CompletedBuildStep {
+    step_id: String,
+    attempts_used: usize,
+    execution_record_id: String,
+    verification_record_id: String,
+}
+
+impl CompletedBuildStep {
+    pub fn step_id(&self) -> &str {
+        &self.step_id
+    }
+
+    pub fn attempts_used(&self) -> usize {
+        self.attempts_used
+    }
+
+    pub fn execution_record_id(&self) -> &str {
+        &self.execution_record_id
+    }
+
+    pub fn verification_record_id(&self) -> &str {
+        &self.verification_record_id
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum BuildRunOutcome {
+    Complete {
+        completed_steps: Vec<CompletedBuildStep>,
+        journal_records: Vec<RuntimeRecordEnvelope>,
+    },
+    Stopped {
+        completed_steps: Vec<CompletedBuildStep>,
+        stopped_step_id: String,
+        reason: String,
+        failures: Vec<BuildFailureContext>,
+        journal_records: Vec<RuntimeRecordEnvelope>,
+    },
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub enum RuntimeRecordKind {
     Request,
@@ -1906,6 +2139,99 @@ impl RuntimeJournal {
                 .into_iter()
                 .next(),
         )
+    }
+
+    pub fn run_stepped_build<P: BuildProposalProvider>(
+        &self,
+        plan: &BuildPlan,
+        provider: &mut P,
+        limits: &BuildRunLimits,
+        confirmation_assertion_context: impl Into<String>,
+    ) -> Result<BuildRunOutcome, String> {
+        if plan.exact_request().request_id() != self.request_id {
+            return Err("build plan request id does not match journal".to_string());
+        }
+        plan.validate()?;
+        let confirmation_assertion_context = confirmation_assertion_context.into();
+        let mut completed_steps = Vec::new();
+        for (step_index, step) in plan.steps().iter().enumerate() {
+            let intent = self.confirm_intent(
+                intent_draft_for_build_step(plan, step_index, step)?,
+                external_operator_assertion(format!(
+                    "{confirmation_assertion_context}:{}",
+                    step.step_id()
+                )),
+            )?;
+            let mut failures = Vec::new();
+            for attempt_index in 0..limits.max_attempts_per_step() {
+                let context = BuildProposalContext {
+                    plan_id: plan.plan_id.clone(),
+                    step_index,
+                    step: step.clone(),
+                    prior_failures: failures.clone(),
+                };
+                let proposal = match provider.propose(&context) {
+                    Ok(proposal) => proposal,
+                    Err(err) => {
+                        return Ok(BuildRunOutcome::Stopped {
+                            completed_steps,
+                            stopped_step_id: step.step_id.clone(),
+                            reason: format!("proposal provider failed: {err}"),
+                            failures,
+                            journal_records: self.verify()?,
+                        });
+                    }
+                };
+                match self.run_ef_rescue_attempt(&intent, &proposal)? {
+                    EfRescueAttemptOutcome::Artifact {
+                        execution_record_id,
+                        verification_record_id,
+                        ..
+                    } => {
+                        completed_steps.push(CompletedBuildStep {
+                            step_id: step.step_id.clone(),
+                            attempts_used: attempt_index + 1,
+                            execution_record_id,
+                            verification_record_id,
+                        });
+                        break;
+                    }
+                    EfRescueAttemptOutcome::UnresolvedFailure {
+                        failure_class,
+                        gate,
+                        failure,
+                        vault,
+                        ..
+                    } => {
+                        failures.push(BuildFailureContext {
+                            step_id: step.step_id.clone(),
+                            attempt_number: attempt_index + 1,
+                            failure_class,
+                            evidence: failure.evidence().to_vec(),
+                            gate_reasons: gate.reasons().to_vec(),
+                            lock_signals: vault.lock_signals().to_vec(),
+                        });
+                    }
+                }
+            }
+            if completed_steps
+                .last()
+                .map(|completed| completed.step_id() != step.step_id())
+                .unwrap_or(true)
+            {
+                return Ok(BuildRunOutcome::Stopped {
+                    completed_steps,
+                    stopped_step_id: step.step_id.clone(),
+                    reason: "step attempt limit reached".to_string(),
+                    failures,
+                    journal_records: self.verify()?,
+                });
+            }
+        }
+        Ok(BuildRunOutcome::Complete {
+            completed_steps,
+            journal_records: self.verify()?,
+        })
     }
 
     pub fn verify(&self) -> Result<Vec<RuntimeRecordEnvelope>, String> {
@@ -4450,6 +4776,36 @@ fn find_record<'a>(
         .iter()
         .find(|record| record.record_id == record_id)
         .ok_or_else(|| format!("record '{record_id}' not found"))
+}
+
+fn intent_draft_for_build_step(
+    plan: &BuildPlan,
+    step_index: usize,
+    step: &BuildStepSpec,
+) -> Result<IntentDraft, String> {
+    let request_text = plan.exact_request().text();
+    let request_span = SourceSpan::new(0, request_text.len(), request_text);
+    let mut claims = vec![IntentClaim::new(
+        format!("{}-instruction", step.step_id()),
+        IntentClaimKind::HardRequirement,
+        step.instruction().to_string(),
+        vec![request_span.clone()],
+    )];
+    for (criterion_index, criterion) in step.acceptance_criteria().iter().enumerate() {
+        claims.push(IntentClaim::new(
+            format!("{}-accept-{}", step.step_id(), criterion_index + 1),
+            IntentClaimKind::AcceptanceCriterion,
+            criterion.clone(),
+            vec![request_span.clone()],
+        ));
+    }
+    let draft = IntentDraft::new(
+        format!("{}-step-{}-intent", plan.plan_id(), step_index + 1),
+        plan.exact_request().clone(),
+        claims,
+    );
+    validate_intent_draft(&draft)?;
+    Ok(draft)
 }
 
 fn verify_acceptance_claim(claim: &IntentClaim, bounds: &HostBounds) -> bool {
