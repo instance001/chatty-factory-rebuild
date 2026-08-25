@@ -1,0 +1,24 @@
+warning: unreachable expression
+ --> tests/ui/gate_receipt_cannot_authorize.rs:7:57
+  |
+7 |     let _ = journal.authorize_work_order(gate, todo!(), todo!());
+  |                                                -------  ^^^^^^^ unreachable expression
+  |                                                |
+  |                                                any code following this expression is unreachable
+  |
+  = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
+  = note: this warning originates in the macro `todo` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0308]: mismatched types
+ --> tests/ui/gate_receipt_cannot_authorize.rs:7:42
+  |
+7 |     let _ = journal.authorize_work_order(gate, todo!(), todo!());
+  |                     -------------------- ^^^^ expected `AllowedAttemptCapability`, found `GateReceipt`
+  |                     |
+  |                     arguments to this method are incorrect
+  |
+note: method defined here
+ --> src/lib.rs
+  |
+  |     pub fn authorize_work_order(
+  |            ^^^^^^^^^^^^^^^^^^^^

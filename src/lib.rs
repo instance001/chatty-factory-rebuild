@@ -4939,6 +4939,29 @@ mod tests {
     }
 
     #[test]
+    fn proposal_hash_is_stable_for_current_schema_across_reload() {
+        let temp = tempfile::tempdir().unwrap();
+        let intent = intent();
+        let runtime = tempfile::tempdir().unwrap();
+        let journal =
+            RuntimeJournal::new(runtime.path(), "trace-1", "request-1", bounds(temp.path()));
+        let method = proposal("proposal-stable-hash", "README.md", "hello");
+        let expected_hash = hash_serializable(&method).unwrap();
+
+        let allowed = journal.issue_allowed_attempt(&intent, &method).unwrap();
+        let reloaded =
+            RuntimeJournal::new(runtime.path(), "trace-1", "request-1", bounds(temp.path()));
+        let records = reloaded.verify().unwrap();
+        let gate_record = find_record(&records, &allowed.gate_record_id).unwrap();
+        let gate: GateReceipt = serde_json::from_value(gate_record.payload.clone()).unwrap();
+
+        assert_eq!(gate.proposal_hash(), expected_hash);
+        assert!(reloaded
+            .reissue_allowed_attempt(&allowed.gate_record_id, &intent, &method)
+            .is_ok());
+    }
+
+    #[test]
     fn valid_verified_journal_reissues_only_exact_allowed_capability() {
         let temp = tempfile::tempdir().unwrap();
         let runtime = tempfile::tempdir().unwrap();
@@ -6492,6 +6515,149 @@ mod tests {
     }
 
     #[test]
+    fn journal_records_preserve_constitutional_roles_on_success_path() {
+        let workspace = tempfile::tempdir().unwrap();
+        let runtime = tempfile::tempdir().unwrap();
+        let intent = intent();
+        let method = proposal("proposal-external-method", "README.md", "hello");
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(workspace.path()),
+        );
+
+        let output = journal.run_ef_rescue_attempt(&intent, &method).unwrap();
+
+        assert!(matches!(output, EfRescueAttemptOutcome::Artifact { .. }));
+        let records = journal.verify().unwrap();
+        let proposal_record = records
+            .iter()
+            .find(|record| record.record_kind == RuntimeRecordKind::Proposal)
+            .unwrap();
+        let gate_record = records
+            .iter()
+            .find(|record| record.record_kind == RuntimeRecordKind::GateReceipt)
+            .unwrap();
+        let work_order_record = records
+            .iter()
+            .find(|record| record.record_kind == RuntimeRecordKind::WorkOrderReceipt)
+            .unwrap();
+        let verification_record = records
+            .iter()
+            .find(|record| record.record_kind == RuntimeRecordKind::VerificationReceipt)
+            .unwrap();
+        let confirmed_record = records
+            .iter()
+            .find(|record| record.record_kind == RuntimeRecordKind::ConfirmedIntentReceipt)
+            .unwrap();
+        let proposal: MethodProposal =
+            serde_json::from_value(proposal_record.payload.clone()).unwrap();
+        let gate: GateReceipt = serde_json::from_value(gate_record.payload.clone()).unwrap();
+        let work_order: WorkOrderReceipt =
+            serde_json::from_value(work_order_record.payload.clone()).unwrap();
+        let verification: VerificationReceipt =
+            serde_json::from_value(verification_record.payload.clone()).unwrap();
+
+        assert_eq!(proposal, method);
+        assert_eq!(
+            gate.confirmed_intent_receipt_id(),
+            intent.receipt().receipt_id()
+        );
+        assert_eq!(
+            gate.confirmed_intent_receipt_hash(),
+            confirmed_record.payload_hash()
+        );
+        assert_eq!(gate.proposal_id(), method.proposal_id());
+        assert_eq!(gate.proposal_hash(), hash_serializable(&method).unwrap());
+        assert!(gate.admissible());
+        assert!(gate.reasons().is_empty());
+        assert_eq!(work_order.proposal_id(), method.proposal_id());
+        assert_eq!(work_order.proposal_hash(), gate.proposal_hash());
+        assert_eq!(
+            work_order.steps(),
+            &[BoundedStep::WriteFile {
+                path: PathBuf::from("README.md"),
+                contents: "hello".to_string()
+            }]
+        );
+        assert!(verification.success());
+        assert_eq!(verification.checked_claim_ids(), &["accept-1".to_string()]);
+        assert!(!records
+            .iter()
+            .any(|record| record.record_kind == RuntimeRecordKind::PromotionCandidate));
+    }
+
+    #[test]
+    fn journal_records_preserve_constitutional_roles_on_failure_path() {
+        let workspace = tempfile::tempdir().unwrap();
+        let runtime = tempfile::tempdir().unwrap();
+        let intent = intent();
+        let method = MethodProposal::new(
+            "proposal-model-claims-success-while-failing",
+            "external method claims success, but host verification owns truth",
+            vec![ProposedStep::WriteFile {
+                path: PathBuf::from("README.md"),
+                contents: "wrong".to_string(),
+            }],
+            vec!["model says verification passed".to_string()],
+        );
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(workspace.path()),
+        );
+
+        let output = journal.run_ef_rescue_attempt(&intent, &method).unwrap();
+
+        let EfRescueAttemptOutcome::UnresolvedFailure {
+            failure_class,
+            gate,
+            failure,
+            vault,
+            observation,
+            ..
+        } = output
+        else {
+            panic!("wrong artifact should become host-evidenced failure");
+        };
+        assert_eq!(failure_class, FailureClass::VerificationFailed);
+        assert!(gate.admissible());
+        assert!(gate.reasons().is_empty());
+        assert_eq!(gate.proposal_id(), method.proposal_id());
+        assert_eq!(gate.proposal_hash(), hash_serializable(&method).unwrap());
+        assert_eq!(failure.failure_class(), &FailureClass::VerificationFailed);
+        assert_eq!(vault.failure_class(), &FailureClass::VerificationFailed);
+        assert_eq!(observation.lock_signal(), "write:README.md");
+        assert!(
+            failure.evidence()[0].contains("claim 'accept-1' failed"),
+            "host verification evidence, not model suggested verification, defines failure truth"
+        );
+        assert!(!failure
+            .evidence()
+            .iter()
+            .any(|entry| entry.contains("model says verification passed")));
+
+        let records = journal.verify().unwrap();
+        let kinds = records
+            .iter()
+            .map(|record| record.record_kind)
+            .collect::<Vec<_>>();
+        assert!(kinds.contains(&RuntimeRecordKind::Proposal));
+        assert!(kinds.contains(&RuntimeRecordKind::GateReceipt));
+        assert!(kinds.contains(&RuntimeRecordKind::ExecutionReceipt));
+        assert!(kinds.contains(&RuntimeRecordKind::VerificationReceipt));
+        assert!(kinds.contains(&RuntimeRecordKind::FailureEvidence));
+        assert!(kinds.contains(&RuntimeRecordKind::VaultEntry));
+        assert!(kinds.contains(&RuntimeRecordKind::FailureObservation));
+        assert!(!kinds.contains(&RuntimeRecordKind::TriangulationReceipt));
+        assert!(!kinds.contains(&RuntimeRecordKind::PromotionCandidate));
+        assert!(!kinds.contains(&RuntimeRecordKind::PromotionApproval));
+        assert!(journal.active_promoted_constraints().unwrap().is_empty());
+    }
+
+    #[test]
     fn preference_and_ambiguity_claims_do_not_create_method_lanes() {
         let workspace = tempfile::tempdir().unwrap();
         let runtime = tempfile::tempdir().unwrap();
@@ -7585,6 +7751,27 @@ mod tests {
     }
 
     #[test]
+    fn deserialized_gate_receipt_is_inert_without_reissued_capability() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = tempfile::tempdir().unwrap();
+        let intent = intent();
+        let method = proposal("proposal-a", "README.md", "hello");
+        let journal =
+            RuntimeJournal::new(runtime.path(), "trace-1", "request-1", bounds(temp.path()));
+        let allowed = journal.issue_allowed_attempt(&intent, &method).unwrap();
+        let serialized_receipt = serde_json::to_string(allowed.gate_receipt()).unwrap();
+        let deserialized_receipt: GateReceipt = serde_json::from_str(&serialized_receipt).unwrap();
+
+        assert!(deserialized_receipt.admissible());
+        let reissued = journal
+            .reissue_allowed_attempt(&allowed.gate_record_id, &intent, &method)
+            .unwrap();
+        journal
+            .authorize_work_order(reissued, &intent, &method)
+            .unwrap();
+    }
+
+    #[test]
     fn forged_external_operator_assertion_cannot_confirm_intent() {
         let mut assertion = external_operator_assertion("operator-confirmation");
         assertion.assertion_id = "caller-picked-assertion".to_string();
@@ -7630,9 +7817,35 @@ mod tests {
             "request-1",
             bounds(Path::new(".")),
         );
+        let request_text = "Create café README with hello";
+        let cafe_start = request_text.find("café").unwrap();
+        let request_draft = IntentDraft {
+            draft_id: "draft-utf8".to_string(),
+            exact_request: ExactRequest::new("request-1", request_text),
+            derived_claims: vec![
+                IntentClaim {
+                    claim_id: "accept-1".to_string(),
+                    kind: IntentClaimKind::AcceptanceCriterion,
+                    text: "file_contains:README.md::hello".to_string(),
+                    source_spans: vec![SourceSpan::new(0, request_text.len(), request_text)],
+                },
+                IntentClaim {
+                    claim_id: "preference-1".to_string(),
+                    kind: IntentClaimKind::Preference,
+                    text: "café".to_string(),
+                    source_spans: vec![SourceSpan::new(
+                        cafe_start,
+                        cafe_start + "café".len(),
+                        "café",
+                    )],
+                },
+            ],
+        };
+        let expected_request_hash = request_draft.exact_request().bytes_sha256().to_string();
+        let expected_request_len = request_draft.exact_request().byte_len();
         journal
             .confirm_intent(
-                draft("Create README with hello", "file_contains:README.md::hello"),
+                request_draft,
                 external_operator_assertion("operator-confirmation"),
             )
             .unwrap();
@@ -7653,6 +7866,37 @@ mod tests {
         let reissued = reloaded
             .reissue_confirmed_intent(&confirmed_record_id)
             .unwrap();
+        let receipt = reissued.receipt();
+        assert_eq!(receipt.exact_request().text(), request_text);
+        assert_eq!(
+            receipt.exact_request().bytes_sha256(),
+            expected_request_hash
+        );
+        assert_eq!(receipt.exact_request().byte_len(), expected_request_len);
+        assert_eq!(receipt.derived_claims().len(), 2);
+        assert_eq!(
+            receipt.derived_claims()[0].kind(),
+            &IntentClaimKind::AcceptanceCriterion
+        );
+        assert_eq!(
+            receipt.derived_claims()[0].text(),
+            "file_contains:README.md::hello"
+        );
+        assert_eq!(
+            receipt.derived_claims()[1].kind(),
+            &IntentClaimKind::Preference
+        );
+        let span = &receipt.derived_claims()[1].source_spans()[0];
+        assert!(receipt
+            .exact_request()
+            .text()
+            .is_char_boundary(span.start()));
+        assert!(receipt.exact_request().text().is_char_boundary(span.end()));
+        assert_eq!(
+            &receipt.exact_request().text()[span.start()..span.end()],
+            "café"
+        );
+        assert_eq!(span.exact_text(), "café");
         let method = proposal("proposal-a", "README.md", "hello");
         reloaded.issue_allowed_attempt(&reissued, &method).unwrap();
     }
@@ -9113,6 +9357,60 @@ mod tests {
     }
 
     #[test]
+    fn persisted_verification_receipt_is_frozen_historical_evidence() {
+        let runtime = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let intent = intent();
+        let method = proposal("proposal-a", "README.md", "hello");
+        let journal = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(workspace.path()),
+        );
+        let allowed = journal.issue_allowed_attempt(&intent, &method).unwrap();
+        let work_order = journal
+            .authorize_work_order(allowed, &intent, &method)
+            .unwrap();
+        let work_order_record_id = work_order.work_order_record_id.clone();
+        let execution = journal.execute_work_order(work_order).unwrap();
+        let execution_record = journal
+            .append_execution_receipt(work_order_record_id, &execution)
+            .unwrap();
+        let verification = verify_against_intent(&execution, &intent, &bounds(workspace.path()));
+        let verification_record = journal
+            .append_verification_receipt(execution_record.record_id, &verification)
+            .unwrap();
+        fs::write(
+            workspace.path().join("README.md"),
+            "changed after verification",
+        )
+        .unwrap();
+
+        let reloaded = RuntimeJournal::new(
+            runtime.path(),
+            "trace-1",
+            "request-1",
+            bounds(workspace.path()),
+        );
+        let records = reloaded.verify().unwrap();
+        let persisted_verification: VerificationReceipt = serde_json::from_value(
+            find_record(&records, verification_record.record_id())
+                .unwrap()
+                .payload
+                .clone(),
+        )
+        .unwrap();
+
+        assert!(persisted_verification.success());
+        assert_eq!(
+            persisted_verification.evidence(),
+            &["claim 'accept-1' passed".to_string()]
+        );
+        assert!(!verify_against_intent(&execution, &intent, &bounds(workspace.path())).success());
+    }
+
+    #[test]
     fn model_suggested_verification_text_is_not_authoritative() {
         let workspace = tempfile::tempdir().unwrap();
         let runtime = tempfile::tempdir().unwrap();
@@ -9972,6 +10270,7 @@ mod tests {
         tests.compile_fail("tests/ui/caller_supplied_promoted_constraints.rs");
         tests.compile_fail("tests/ui/arbitrary_append_record.rs");
         tests.compile_fail("tests/ui/fabricated_typed_appends.rs");
+        tests.compile_fail("tests/ui/gate_receipt_cannot_authorize.rs");
         tests.compile_fail("tests/ui/forge_authorized_work_order.rs");
         tests.compile_fail("tests/ui/forge_external_operator_assertion.rs");
         tests.compile_fail("tests/ui/forge_execution_receipt.rs");
