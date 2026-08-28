@@ -1,8 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::fs::OpenOptions;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -1185,7 +1188,7 @@ pub enum EfRescueAttemptOutcome {
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BuildStepSpec {
     step_id: String,
     instruction: String,
@@ -1218,7 +1221,7 @@ impl BuildStepSpec {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BuildPlan {
     plan_id: String,
     exact_request: ExactRequest,
@@ -1250,6 +1253,41 @@ impl BuildPlan {
 
     pub fn steps(&self) -> &[BuildStepSpec] {
         &self.steps
+    }
+
+    pub fn from_json(json: &str) -> Result<Self, String> {
+        let plan: Self = serde_json::from_str(json)
+            .map_err(|err| format!("could not decode build plan JSON: {err}"))?;
+        plan.validate()?;
+        Ok(plan)
+    }
+
+    pub fn to_json(&self) -> Result<String, String> {
+        self.validate()?;
+        serde_json::to_string_pretty(self)
+            .map_err(|err| format!("could not serialize build plan JSON: {err}"))
+    }
+
+    pub fn read_json_file(path: impl AsRef<Path>) -> Result<Self, String> {
+        let path = path.as_ref();
+        let json = fs::read_to_string(path)
+            .map_err(|err| format!("could not read build plan '{}': {}", path.display(), err))?;
+        Self::from_json(&json)
+    }
+
+    pub fn write_json_file(&self, path: impl AsRef<Path>) -> Result<(), String> {
+        let path = path.as_ref();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|err| {
+                format!(
+                    "could not create build plan directory '{}': {}",
+                    parent.display(),
+                    err
+                )
+            })?;
+        }
+        fs::write(path, self.to_json()?)
+            .map_err(|err| format!("could not write build plan '{}': {}", path.display(), err))
     }
 
     fn validate(&self) -> Result<(), String> {
@@ -1310,7 +1348,7 @@ impl BuildRunLimits {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BuildFailureContext {
     step_id: String,
     attempt_number: usize,
@@ -1376,6 +1414,742 @@ pub trait BuildProposalProvider {
     fn propose(&mut self, context: &BuildProposalContext) -> Result<MethodProposal, String>;
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BuildProposalRequest {
+    plan_id: String,
+    step_index: usize,
+    step: BuildStepSpec,
+    prior_failures: Vec<BuildFailureContext>,
+}
+
+impl BuildProposalRequest {
+    pub fn plan_id(&self) -> &str {
+        &self.plan_id
+    }
+
+    pub fn step_index(&self) -> usize {
+        self.step_index
+    }
+
+    pub fn step(&self) -> &BuildStepSpec {
+        &self.step
+    }
+
+    pub fn prior_failures(&self) -> &[BuildFailureContext] {
+        &self.prior_failures
+    }
+}
+
+impl From<&BuildProposalContext> for BuildProposalRequest {
+    fn from(context: &BuildProposalContext) -> Self {
+        Self {
+            plan_id: context.plan_id.clone(),
+            step_index: context.step_index,
+            step: context.step.clone(),
+            prior_failures: context.prior_failures.clone(),
+        }
+    }
+}
+
+pub trait JsonBuildProposalService {
+    fn propose_json(&mut self, request_json: &str) -> Result<String, String>;
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CommandJsonProviderConfig {
+    program: PathBuf,
+    args: Vec<String>,
+    timeout_ms: Option<u64>,
+}
+
+impl CommandJsonProviderConfig {
+    pub fn new(program: impl Into<PathBuf>, args: Vec<String>, timeout_ms: Option<u64>) -> Self {
+        Self {
+            program: program.into(),
+            args,
+            timeout_ms,
+        }
+    }
+
+    pub fn program(&self) -> &Path {
+        &self.program
+    }
+
+    pub fn args(&self) -> &[String] {
+        &self.args
+    }
+
+    pub fn timeout_ms(&self) -> Option<u64> {
+        self.timeout_ms
+    }
+
+    pub fn to_service(&self) -> Result<CommandJsonBuildProposalService, String> {
+        self.validate()?;
+        let service =
+            CommandJsonBuildProposalService::with_args(self.program.clone(), self.args.clone());
+        Ok(if let Some(timeout_ms) = self.timeout_ms {
+            service.with_timeout(Duration::from_millis(timeout_ms))
+        } else {
+            service
+        })
+    }
+
+    pub fn from_json(json: &str) -> Result<Self, String> {
+        let config: Self = serde_json::from_str(json)
+            .map_err(|err| format!("could not decode command provider config JSON: {err}"))?;
+        config.validate()?;
+        Ok(config)
+    }
+
+    pub fn to_json(&self) -> Result<String, String> {
+        self.validate()?;
+        serde_json::to_string_pretty(self)
+            .map_err(|err| format!("could not serialize command provider config JSON: {err}"))
+    }
+
+    pub fn read_json_file(path: impl AsRef<Path>) -> Result<Self, String> {
+        let path = path.as_ref();
+        let json = fs::read_to_string(path).map_err(|err| {
+            format!(
+                "could not read command provider config '{}': {}",
+                path.display(),
+                err
+            )
+        })?;
+        Self::from_json(&json)
+    }
+
+    pub fn write_json_file(&self, path: impl AsRef<Path>) -> Result<(), String> {
+        let path = path.as_ref();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|err| {
+                format!(
+                    "could not create command provider config directory '{}': {}",
+                    parent.display(),
+                    err
+                )
+            })?;
+        }
+        fs::write(path, self.to_json()?).map_err(|err| {
+            format!(
+                "could not write command provider config '{}': {}",
+                path.display(),
+                err
+            )
+        })
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        if self.program.as_os_str().is_empty() {
+            return Err("command provider program must be non-empty".to_string());
+        }
+        if self.timeout_ms == Some(0) {
+            return Err("command provider timeout must be greater than zero".to_string());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CommandBuildSessionConfig {
+    runtime_root: PathBuf,
+    workspace_root: PathBuf,
+    plan_path: PathBuf,
+    provider_config_path: PathBuf,
+    trace_id: String,
+    request_id: String,
+    confirmation_context: String,
+    max_files: usize,
+    max_file_bytes: usize,
+    max_attempts_per_step: usize,
+    manifest_path: Option<PathBuf>,
+    bundle_root: Option<PathBuf>,
+    transcript_path: Option<PathBuf>,
+}
+
+impl CommandBuildSessionConfig {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        runtime_root: impl Into<PathBuf>,
+        workspace_root: impl Into<PathBuf>,
+        plan_path: impl Into<PathBuf>,
+        provider_config_path: impl Into<PathBuf>,
+        trace_id: impl Into<String>,
+        request_id: impl Into<String>,
+        confirmation_context: impl Into<String>,
+        max_files: usize,
+        max_file_bytes: usize,
+        max_attempts_per_step: usize,
+        manifest_path: Option<PathBuf>,
+        bundle_root: Option<PathBuf>,
+        transcript_path: Option<PathBuf>,
+    ) -> Result<Self, String> {
+        let config = Self {
+            runtime_root: runtime_root.into(),
+            workspace_root: workspace_root.into(),
+            plan_path: plan_path.into(),
+            provider_config_path: provider_config_path.into(),
+            trace_id: trace_id.into(),
+            request_id: request_id.into(),
+            confirmation_context: confirmation_context.into(),
+            max_files,
+            max_file_bytes,
+            max_attempts_per_step,
+            manifest_path,
+            bundle_root,
+            transcript_path,
+        };
+        config.validate()?;
+        Ok(config)
+    }
+
+    pub fn runtime_root(&self) -> &Path {
+        &self.runtime_root
+    }
+
+    pub fn workspace_root(&self) -> &Path {
+        &self.workspace_root
+    }
+
+    pub fn plan_path(&self) -> &Path {
+        &self.plan_path
+    }
+
+    pub fn provider_config_path(&self) -> &Path {
+        &self.provider_config_path
+    }
+
+    pub fn trace_id(&self) -> &str {
+        &self.trace_id
+    }
+
+    pub fn request_id(&self) -> &str {
+        &self.request_id
+    }
+
+    pub fn confirmation_context(&self) -> &str {
+        &self.confirmation_context
+    }
+
+    pub fn max_files(&self) -> usize {
+        self.max_files
+    }
+
+    pub fn max_file_bytes(&self) -> usize {
+        self.max_file_bytes
+    }
+
+    pub fn max_attempts_per_step(&self) -> usize {
+        self.max_attempts_per_step
+    }
+
+    pub fn manifest_path(&self) -> Option<&Path> {
+        self.manifest_path.as_deref()
+    }
+
+    pub fn bundle_root(&self) -> Option<&Path> {
+        self.bundle_root.as_deref()
+    }
+
+    pub fn transcript_path(&self) -> Option<&Path> {
+        self.transcript_path.as_deref()
+    }
+
+    pub fn host_bounds(&self) -> HostBounds {
+        HostBounds::new(
+            self.workspace_root.clone(),
+            self.max_files,
+            self.max_file_bytes,
+        )
+    }
+
+    pub fn limits(&self) -> Result<BuildRunLimits, String> {
+        BuildRunLimits::new(self.max_attempts_per_step)
+    }
+
+    pub fn exports(&self) -> BuildSessionExportPaths {
+        let mut exports = match (&self.manifest_path, &self.bundle_root) {
+            (Some(manifest_path), Some(bundle_root)) => {
+                BuildSessionExportPaths::manifest_and_bundle(manifest_path, bundle_root)
+            }
+            (Some(manifest_path), None) => BuildSessionExportPaths::manifest(manifest_path),
+            (None, Some(bundle_root)) => BuildSessionExportPaths::bundle(bundle_root),
+            (None, None) => BuildSessionExportPaths::none(),
+        };
+        if let Some(transcript_path) = &self.transcript_path {
+            exports = exports.with_transcript(transcript_path);
+        }
+        exports
+    }
+
+    pub fn from_json(json: &str) -> Result<Self, String> {
+        let config: Self = serde_json::from_str(json)
+            .map_err(|err| format!("could not decode command build session config JSON: {err}"))?;
+        config.validate()?;
+        Ok(config)
+    }
+
+    pub fn to_json(&self) -> Result<String, String> {
+        self.validate()?;
+        serde_json::to_string_pretty(self)
+            .map_err(|err| format!("could not serialize command build session config JSON: {err}"))
+    }
+
+    pub fn read_json_file(path: impl AsRef<Path>) -> Result<Self, String> {
+        let path = path.as_ref();
+        let json = fs::read_to_string(path).map_err(|err| {
+            format!(
+                "could not read command build session config '{}': {}",
+                path.display(),
+                err
+            )
+        })?;
+        Self::from_json(&json)
+    }
+
+    pub fn write_json_file(&self, path: impl AsRef<Path>) -> Result<(), String> {
+        let path = path.as_ref();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|err| {
+                format!(
+                    "could not create command build session config directory '{}': {}",
+                    parent.display(),
+                    err
+                )
+            })?;
+        }
+        fs::write(path, self.to_json()?).map_err(|err| {
+            format!(
+                "could not write command build session config '{}': {}",
+                path.display(),
+                err
+            )
+        })
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        if self.runtime_root.as_os_str().is_empty() {
+            return Err("command build session config requires runtime_root".to_string());
+        }
+        if self.workspace_root.as_os_str().is_empty() {
+            return Err("command build session config requires workspace_root".to_string());
+        }
+        if self.plan_path.as_os_str().is_empty() {
+            return Err("command build session config requires plan_path".to_string());
+        }
+        if self.provider_config_path.as_os_str().is_empty() {
+            return Err("command build session config requires provider_config_path".to_string());
+        }
+        if self.trace_id.trim().is_empty() {
+            return Err("command build session config requires trace_id".to_string());
+        }
+        if self.request_id.trim().is_empty() {
+            return Err("command build session config requires request_id".to_string());
+        }
+        if self.confirmation_context.trim().is_empty() {
+            return Err("command build session config requires confirmation_context".to_string());
+        }
+        if self.max_files == 0 {
+            return Err("command build session config max_files must be at least one".to_string());
+        }
+        if self.max_file_bytes == 0 {
+            return Err(
+                "command build session config max_file_bytes must be at least one".to_string(),
+            );
+        }
+        BuildRunLimits::new(self.max_attempts_per_step)?;
+        Ok(())
+    }
+}
+
+pub struct CommandJsonBuildProposalService {
+    program: PathBuf,
+    args: Vec<String>,
+    timeout: Option<Duration>,
+}
+
+impl CommandJsonBuildProposalService {
+    pub fn new(program: impl Into<PathBuf>) -> Self {
+        Self {
+            program: program.into(),
+            args: Vec::new(),
+            timeout: None,
+        }
+    }
+
+    pub fn with_args(program: impl Into<PathBuf>, args: Vec<String>) -> Self {
+        Self {
+            program: program.into(),
+            args,
+            timeout: None,
+        }
+    }
+
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = Some(timeout);
+        self
+    }
+
+    pub fn program(&self) -> &Path {
+        &self.program
+    }
+
+    pub fn args(&self) -> &[String] {
+        &self.args
+    }
+
+    pub fn timeout(&self) -> Option<Duration> {
+        self.timeout
+    }
+}
+
+impl JsonBuildProposalService for CommandJsonBuildProposalService {
+    fn propose_json(&mut self, request_json: &str) -> Result<String, String> {
+        let mut child = Command::new(&self.program)
+            .args(&self.args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|err| {
+                format!(
+                    "could not start JSON proposal command '{}': {}",
+                    self.program.display(),
+                    err
+                )
+            })?;
+        {
+            let stdin = child.stdin.as_mut().ok_or_else(|| {
+                format!(
+                    "JSON proposal command '{}' did not expose stdin",
+                    self.program.display()
+                )
+            })?;
+            stdin.write_all(request_json.as_bytes()).map_err(|err| {
+                format!(
+                    "could not write proposal request to '{}': {}",
+                    self.program.display(),
+                    err
+                )
+            })?;
+        }
+        let output = wait_for_json_proposal_command(child, &self.program, self.timeout)?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            return Err(format!(
+                "JSON proposal command '{}' failed with status {}: {}",
+                self.program.display(),
+                output.status,
+                stderr
+            ));
+        }
+        String::from_utf8(output.stdout).map_err(|err| {
+            format!(
+                "JSON proposal command '{}' emitted non-UTF-8 stdout: {}",
+                self.program.display(),
+                err
+            )
+        })
+    }
+}
+
+fn wait_for_json_proposal_command(
+    mut child: std::process::Child,
+    program: &Path,
+    timeout: Option<Duration>,
+) -> Result<std::process::Output, String> {
+    let Some(timeout) = timeout else {
+        return child.wait_with_output().map_err(|err| {
+            format!(
+                "could not read JSON proposal command '{}': {}",
+                program.display(),
+                err
+            )
+        });
+    };
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_status)) => {
+                let mut stdout = Vec::new();
+                let mut stderr = Vec::new();
+                if let Some(mut child_stdout) = child.stdout.take() {
+                    child_stdout.read_to_end(&mut stdout).map_err(|err| {
+                        format!(
+                            "could not read stdout from JSON proposal command '{}': {}",
+                            program.display(),
+                            err
+                        )
+                    })?;
+                }
+                if let Some(mut child_stderr) = child.stderr.take() {
+                    child_stderr.read_to_end(&mut stderr).map_err(|err| {
+                        format!(
+                            "could not read stderr from JSON proposal command '{}': {}",
+                            program.display(),
+                            err
+                        )
+                    })?;
+                }
+                let output = child.wait_with_output().map_err(|err| {
+                    format!(
+                        "could not finalize JSON proposal command '{}': {}",
+                        program.display(),
+                        err
+                    )
+                })?;
+                return Ok(std::process::Output {
+                    status: output.status,
+                    stdout,
+                    stderr,
+                });
+            }
+            Ok(None) if started.elapsed() >= timeout => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "JSON proposal command '{}' timed out after {} ms",
+                    program.display(),
+                    timeout.as_millis()
+                ));
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(10)),
+            Err(err) => {
+                return Err(format!(
+                    "could not poll JSON proposal command '{}': {}",
+                    program.display(),
+                    err
+                ));
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct JsonProviderTranscriptEntry {
+    sequence_number: usize,
+    request: BuildProposalRequest,
+    request_json: String,
+    response_json: Option<String>,
+    error: Option<String>,
+}
+
+impl JsonProviderTranscriptEntry {
+    pub fn sequence_number(&self) -> usize {
+        self.sequence_number
+    }
+
+    pub fn request(&self) -> &BuildProposalRequest {
+        &self.request
+    }
+
+    pub fn request_json(&self) -> &str {
+        &self.request_json
+    }
+
+    pub fn response_json(&self) -> Option<&str> {
+        self.response_json.as_deref()
+    }
+
+    pub fn error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct JsonProviderTranscript {
+    entries: Vec<JsonProviderTranscriptEntry>,
+}
+
+impl JsonProviderTranscript {
+    pub fn new(entries: Vec<JsonProviderTranscriptEntry>) -> Result<Self, String> {
+        validate_json_provider_transcript_entries(&entries)?;
+        Ok(Self { entries })
+    }
+
+    pub fn entries(&self) -> &[JsonProviderTranscriptEntry] {
+        &self.entries
+    }
+
+    pub fn from_json(json: &str) -> Result<Self, String> {
+        let transcript: Self = serde_json::from_str(json)
+            .map_err(|err| format!("could not decode provider transcript JSON: {err}"))?;
+        validate_json_provider_transcript_entries(&transcript.entries)?;
+        Ok(transcript)
+    }
+
+    pub fn to_json(&self) -> Result<String, String> {
+        validate_json_provider_transcript_entries(&self.entries)?;
+        serde_json::to_string_pretty(self)
+            .map_err(|err| format!("could not serialize provider transcript JSON: {err}"))
+    }
+
+    pub fn read_json_file(path: impl AsRef<Path>) -> Result<Self, String> {
+        let path = path.as_ref();
+        let json = fs::read_to_string(path).map_err(|err| {
+            format!(
+                "could not read provider transcript '{}': {}",
+                path.display(),
+                err
+            )
+        })?;
+        Self::from_json(&json)
+    }
+
+    pub fn write_json_file(&self, path: impl AsRef<Path>) -> Result<(), String> {
+        let path = path.as_ref();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|err| {
+                format!(
+                    "could not create provider transcript directory '{}': {}",
+                    parent.display(),
+                    err
+                )
+            })?;
+        }
+        fs::write(path, self.to_json()?).map_err(|err| {
+            format!(
+                "could not write provider transcript '{}': {}",
+                path.display(),
+                err
+            )
+        })
+    }
+}
+
+pub struct TranscriptJsonBuildProposalService<S> {
+    service: S,
+    transcript: Vec<JsonProviderTranscriptEntry>,
+}
+
+impl<S> TranscriptJsonBuildProposalService<S> {
+    pub fn new(service: S) -> Self {
+        Self {
+            service,
+            transcript: Vec::new(),
+        }
+    }
+
+    pub fn transcript(&self) -> &[JsonProviderTranscriptEntry] {
+        &self.transcript
+    }
+
+    pub fn transcript_report(&self) -> Result<JsonProviderTranscript, String> {
+        JsonProviderTranscript::new(self.transcript.clone())
+    }
+
+    pub fn into_inner(self) -> S {
+        self.service
+    }
+}
+
+impl<S: JsonBuildProposalService> JsonBuildProposalService
+    for TranscriptJsonBuildProposalService<S>
+{
+    fn propose_json(&mut self, request_json: &str) -> Result<String, String> {
+        let sequence_number = self.transcript.len();
+        let request: BuildProposalRequest = serde_json::from_str(request_json)
+            .map_err(|err| format!("could not decode transcript proposal request JSON: {err}"))?;
+        match self.service.propose_json(request_json) {
+            Ok(response_json) => {
+                self.transcript.push(JsonProviderTranscriptEntry {
+                    sequence_number,
+                    request,
+                    request_json: request_json.to_string(),
+                    response_json: Some(response_json.clone()),
+                    error: None,
+                });
+                Ok(response_json)
+            }
+            Err(err) => {
+                self.transcript.push(JsonProviderTranscriptEntry {
+                    sequence_number,
+                    request,
+                    request_json: request_json.to_string(),
+                    response_json: None,
+                    error: Some(err.clone()),
+                });
+                Err(err)
+            }
+        }
+    }
+}
+
+fn validate_json_provider_transcript_entries(
+    entries: &[JsonProviderTranscriptEntry],
+) -> Result<(), String> {
+    for (index, entry) in entries.iter().enumerate() {
+        if entry.sequence_number != index {
+            return Err(format!(
+                "provider transcript entry {} has invalid sequence number",
+                entry.sequence_number
+            ));
+        }
+        let decoded_request: BuildProposalRequest = serde_json::from_str(&entry.request_json)
+            .map_err(|err| {
+                format!(
+                    "provider transcript entry {} has invalid request JSON: {}",
+                    entry.sequence_number, err
+                )
+            })?;
+        if decoded_request != entry.request {
+            return Err(format!(
+                "provider transcript entry {} request JSON does not match decoded request",
+                entry.sequence_number
+            ));
+        }
+        match (&entry.response_json, &entry.error) {
+            (Some(response_json), None) => {
+                serde_json::from_str::<MethodProposal>(response_json).map_err(|err| {
+                    format!(
+                        "provider transcript entry {} has invalid response JSON: {}",
+                        entry.sequence_number, err
+                    )
+                })?;
+            }
+            (None, Some(error)) if !error.trim().is_empty() => {}
+            (Some(_), Some(_)) => {
+                return Err(format!(
+                    "provider transcript entry {} has both response and error",
+                    entry.sequence_number
+                ));
+            }
+            (None, _) => {
+                return Err(format!(
+                    "provider transcript entry {} has neither response nor error",
+                    entry.sequence_number
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+pub struct JsonBuildProposalProvider<S> {
+    service: S,
+}
+
+impl<S> JsonBuildProposalProvider<S> {
+    pub fn new(service: S) -> Self {
+        Self { service }
+    }
+
+    pub fn into_inner(self) -> S {
+        self.service
+    }
+}
+
+impl<S: JsonBuildProposalService> BuildProposalProvider for JsonBuildProposalProvider<S> {
+    fn propose(&mut self, context: &BuildProposalContext) -> Result<MethodProposal, String> {
+        let request = BuildProposalRequest::from(context);
+        let request_json = serde_json::to_string(&request)
+            .map_err(|err| format!("could not serialize build proposal request: {err}"))?;
+        let response_json = self.service.propose_json(&request_json)?;
+        serde_json::from_str(&response_json)
+            .map_err(|err| format!("could not decode method proposal response: {err}"))
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CompletedBuildStep {
     step_id: String,
@@ -1399,6 +2173,370 @@ impl CompletedBuildStep {
 
     pub fn verification_record_id(&self) -> &str {
         &self.verification_record_id
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CompletedBuildStepReport {
+    step_id: String,
+    attempts_used: usize,
+    execution_record_id: String,
+    verification_record_id: String,
+    written_files: Vec<PathBuf>,
+    artifacts: Vec<BuildArtifactFile>,
+    checked_claim_ids: Vec<String>,
+    verification_evidence: Vec<String>,
+}
+
+impl CompletedBuildStepReport {
+    pub fn step_id(&self) -> &str {
+        &self.step_id
+    }
+
+    pub fn attempts_used(&self) -> usize {
+        self.attempts_used
+    }
+
+    pub fn execution_record_id(&self) -> &str {
+        &self.execution_record_id
+    }
+
+    pub fn verification_record_id(&self) -> &str {
+        &self.verification_record_id
+    }
+
+    pub fn written_files(&self) -> &[PathBuf] {
+        &self.written_files
+    }
+
+    pub fn artifacts(&self) -> &[BuildArtifactFile] {
+        &self.artifacts
+    }
+
+    pub fn checked_claim_ids(&self) -> &[String] {
+        &self.checked_claim_ids
+    }
+
+    pub fn verification_evidence(&self) -> &[String] {
+        &self.verification_evidence
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BuildArtifactFile {
+    path: PathBuf,
+    byte_len: u64,
+    bytes_sha256: String,
+}
+
+impl BuildArtifactFile {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn byte_len(&self) -> u64 {
+        self.byte_len
+    }
+
+    pub fn bytes_sha256(&self) -> &str {
+        &self.bytes_sha256
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BuildProgress {
+    completed_steps: Vec<CompletedBuildStep>,
+    current_step_index: Option<usize>,
+    current_step_id: Option<String>,
+    current_failures: Vec<BuildFailureContext>,
+}
+
+impl BuildProgress {
+    pub fn completed_steps(&self) -> &[CompletedBuildStep] {
+        &self.completed_steps
+    }
+
+    pub fn current_step_index(&self) -> Option<usize> {
+        self.current_step_index
+    }
+
+    pub fn current_step_id(&self) -> Option<&str> {
+        self.current_step_id.as_deref()
+    }
+
+    pub fn current_failures(&self) -> &[BuildFailureContext] {
+        &self.current_failures
+    }
+
+    pub fn is_complete(&self) -> bool {
+        self.current_step_index.is_none()
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BuildReport {
+    plan_id: String,
+    complete: bool,
+    completed_steps: Vec<CompletedBuildStepReport>,
+    current_step_index: Option<usize>,
+    current_step_id: Option<String>,
+    current_failures: Vec<BuildFailureContext>,
+    journal_record_count: usize,
+}
+
+impl BuildReport {
+    pub fn plan_id(&self) -> &str {
+        &self.plan_id
+    }
+
+    pub fn complete(&self) -> bool {
+        self.complete
+    }
+
+    pub fn completed_steps(&self) -> &[CompletedBuildStepReport] {
+        &self.completed_steps
+    }
+
+    pub fn current_step_index(&self) -> Option<usize> {
+        self.current_step_index
+    }
+
+    pub fn current_step_id(&self) -> Option<&str> {
+        self.current_step_id.as_deref()
+    }
+
+    pub fn current_failures(&self) -> &[BuildFailureContext] {
+        &self.current_failures
+    }
+
+    pub fn journal_record_count(&self) -> usize {
+        self.journal_record_count
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BuildManifest {
+    schema_version: u32,
+    report: BuildReport,
+}
+
+impl BuildManifest {
+    pub fn schema_version(&self) -> u32 {
+        self.schema_version
+    }
+
+    pub fn report(&self) -> &BuildReport {
+        &self.report
+    }
+
+    pub fn to_json(&self) -> Result<String, String> {
+        serde_json::to_string_pretty(self)
+            .map_err(|err| format!("could not serialize build manifest: {err}"))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BuildBundle {
+    bundle_root: PathBuf,
+    manifest_path: PathBuf,
+    journal_path: PathBuf,
+    head_anchor_path: PathBuf,
+    transcript_path: Option<PathBuf>,
+    manifest: BuildManifest,
+    copied_artifacts: Vec<BuildArtifactFile>,
+    provider_transcript: Option<JsonProviderTranscript>,
+}
+
+impl BuildBundle {
+    pub fn read_verified(bundle_root: impl AsRef<Path>) -> Result<Self, String> {
+        let bundle_root = bundle_root.as_ref();
+        let manifest_path = bundle_root.join("build-manifest.json");
+        let manifest_json = fs::read_to_string(&manifest_path).map_err(|err| {
+            format!(
+                "could not read bundle manifest '{}': {}",
+                manifest_path.display(),
+                err
+            )
+        })?;
+        let manifest: BuildManifest = serde_json::from_str(&manifest_json)
+            .map_err(|err| format!("could not decode bundle manifest: {err}"))?;
+        let copied_artifacts = verified_bundle_artifacts(manifest.report(), bundle_root)?;
+        let journal_path = bundle_root.join("evidence/runtime_records.jsonl");
+        let head_anchor_path = bundle_root.join("evidence/journal_head.json");
+        let records = read_bundle_journal_records(&journal_path)?;
+        let head_anchor = read_bundle_head_anchor(&head_anchor_path)?;
+        verify_bundle_journal_envelopes(&records)?;
+        verify_head_anchor(&records, &Some(head_anchor))?;
+        if manifest.report().journal_record_count() != records.len() {
+            return Err(
+                "bundle manifest journal count does not match bundled evidence".to_string(),
+            );
+        }
+        let candidate_transcript_path = bundle_root.join("evidence/provider_transcript.json");
+        let (transcript_path, provider_transcript) = if candidate_transcript_path.exists() {
+            (
+                Some(candidate_transcript_path.clone()),
+                Some(JsonProviderTranscript::read_json_file(
+                    &candidate_transcript_path,
+                )?),
+            )
+        } else {
+            (None, None)
+        };
+        Ok(Self {
+            bundle_root: bundle_root.to_path_buf(),
+            manifest_path,
+            journal_path,
+            head_anchor_path,
+            transcript_path,
+            manifest,
+            copied_artifacts,
+            provider_transcript,
+        })
+    }
+
+    pub fn bundle_root(&self) -> &Path {
+        &self.bundle_root
+    }
+
+    pub fn manifest_path(&self) -> &Path {
+        &self.manifest_path
+    }
+
+    pub fn journal_path(&self) -> &Path {
+        &self.journal_path
+    }
+
+    pub fn head_anchor_path(&self) -> &Path {
+        &self.head_anchor_path
+    }
+
+    pub fn transcript_path(&self) -> Option<&Path> {
+        self.transcript_path.as_deref()
+    }
+
+    pub fn manifest(&self) -> &BuildManifest {
+        &self.manifest
+    }
+
+    pub fn copied_artifacts(&self) -> &[BuildArtifactFile] {
+        &self.copied_artifacts
+    }
+
+    pub fn provider_transcript(&self) -> Option<&JsonProviderTranscript> {
+        self.provider_transcript.as_ref()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BuildSessionExportPaths {
+    manifest_path: Option<PathBuf>,
+    bundle_root: Option<PathBuf>,
+    transcript_path: Option<PathBuf>,
+}
+
+impl BuildSessionExportPaths {
+    pub fn none() -> Self {
+        Self {
+            manifest_path: None,
+            bundle_root: None,
+            transcript_path: None,
+        }
+    }
+
+    pub fn manifest(manifest_path: impl Into<PathBuf>) -> Self {
+        Self {
+            manifest_path: Some(manifest_path.into()),
+            bundle_root: None,
+            transcript_path: None,
+        }
+    }
+
+    pub fn bundle(bundle_root: impl Into<PathBuf>) -> Self {
+        Self {
+            manifest_path: None,
+            bundle_root: Some(bundle_root.into()),
+            transcript_path: None,
+        }
+    }
+
+    pub fn manifest_and_bundle(
+        manifest_path: impl Into<PathBuf>,
+        bundle_root: impl Into<PathBuf>,
+    ) -> Self {
+        Self {
+            manifest_path: Some(manifest_path.into()),
+            bundle_root: Some(bundle_root.into()),
+            transcript_path: None,
+        }
+    }
+
+    pub fn manifest_path(&self) -> Option<&Path> {
+        self.manifest_path.as_deref()
+    }
+
+    pub fn bundle_root(&self) -> Option<&Path> {
+        self.bundle_root.as_deref()
+    }
+
+    pub fn with_transcript(mut self, transcript_path: impl Into<PathBuf>) -> Self {
+        self.transcript_path = Some(transcript_path.into());
+        self
+    }
+
+    pub fn transcript_path(&self) -> Option<&Path> {
+        self.transcript_path.as_deref()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BuildSessionResult {
+    outcome: BuildRunOutcome,
+    report: BuildReport,
+    manifest: Option<BuildManifest>,
+    bundle: Option<BuildBundle>,
+}
+
+impl BuildSessionResult {
+    pub fn outcome(&self) -> &BuildRunOutcome {
+        &self.outcome
+    }
+
+    pub fn report(&self) -> &BuildReport {
+        &self.report
+    }
+
+    pub fn manifest(&self) -> Option<&BuildManifest> {
+        self.manifest.as_ref()
+    }
+
+    pub fn bundle(&self) -> Option<&BuildBundle> {
+        self.bundle.as_ref()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JsonBuildSessionResult<S> {
+    session: BuildSessionResult,
+    provider_transcript: JsonProviderTranscript,
+    service: S,
+}
+
+impl<S> JsonBuildSessionResult<S> {
+    pub fn session(&self) -> &BuildSessionResult {
+        &self.session
+    }
+
+    pub fn provider_transcript(&self) -> &JsonProviderTranscript {
+        &self.provider_transcript
+    }
+
+    pub fn service(&self) -> &S {
+        &self.service
+    }
+
+    pub fn into_service(self) -> S {
+        self.service
     }
 }
 
@@ -1579,6 +2717,33 @@ impl RuntimeJournal {
                     == Some(intent.receipt.receipt_id.as_str())
         }) {
             return Err("confirmed intent receipt already exists in journal".to_string());
+        }
+        let request_record = self.ensure_request_record(&intent.receipt.exact_request)?;
+        self.append_confirmed_intent_receipt(request_record.record_id, &intent)?;
+        Ok(intent)
+    }
+
+    fn ensure_build_step_intent(
+        &self,
+        draft: IntentDraft,
+        confirmation_assertion: ExternalOperatorAssertionReceipt,
+    ) -> Result<ConfirmedIntentCapability, String> {
+        let intent = confirm_intent(draft, confirmation_assertion)?;
+        for record in self.verify()? {
+            if record.record_kind != RuntimeRecordKind::ConfirmedIntentReceipt {
+                continue;
+            }
+            let receipt_id = record
+                .payload
+                .get("receipt_id")
+                .and_then(|value| value.as_str());
+            if receipt_id != Some(intent.receipt.receipt_id.as_str()) {
+                continue;
+            }
+            if record.payload_hash != intent.receipt_hash {
+                return Err("confirmed intent receipt hash mismatch".to_string());
+            }
+            return Ok(intent);
         }
         let request_record = self.ensure_request_record(&intent.receipt.exact_request)?;
         self.append_confirmed_intent_receipt(request_record.record_id, &intent)?;
@@ -2153,17 +3318,37 @@ impl RuntimeJournal {
         }
         plan.validate()?;
         let confirmation_assertion_context = confirmation_assertion_context.into();
-        let mut completed_steps = Vec::new();
-        for (step_index, step) in plan.steps().iter().enumerate() {
-            let intent = self.confirm_intent(
+        let progress = self.build_progress(plan)?;
+        let mut completed_steps = progress.completed_steps;
+        if completed_steps.len() == plan.steps().len() {
+            return Ok(BuildRunOutcome::Complete {
+                completed_steps,
+                journal_records: self.verify()?,
+            });
+        }
+        for (step_index, step) in plan.steps().iter().enumerate().skip(completed_steps.len()) {
+            let intent = self.ensure_build_step_intent(
                 intent_draft_for_build_step(plan, step_index, step)?,
                 external_operator_assertion(format!(
                     "{confirmation_assertion_context}:{}",
                     step.step_id()
                 )),
             )?;
-            let mut failures = Vec::new();
-            for attempt_index in 0..limits.max_attempts_per_step() {
+            let mut failures = if step_index == completed_steps.len() {
+                progress.current_failures.clone()
+            } else {
+                Vec::new()
+            };
+            if failures.len() >= limits.max_attempts_per_step() {
+                return Ok(BuildRunOutcome::Stopped {
+                    completed_steps,
+                    stopped_step_id: step.step_id.clone(),
+                    reason: "step attempt limit reached".to_string(),
+                    failures,
+                    journal_records: self.verify()?,
+                });
+            }
+            for attempt_index in failures.len()..limits.max_attempts_per_step() {
                 let context = BuildProposalContext {
                     plan_id: plan.plan_id.clone(),
                     step_index,
@@ -2231,6 +3416,386 @@ impl RuntimeJournal {
         Ok(BuildRunOutcome::Complete {
             completed_steps,
             journal_records: self.verify()?,
+        })
+    }
+
+    pub fn run_build_session<P: BuildProposalProvider>(
+        &self,
+        plan: &BuildPlan,
+        provider: &mut P,
+        limits: &BuildRunLimits,
+        confirmation_assertion_context: impl Into<String>,
+        exports: &BuildSessionExportPaths,
+    ) -> Result<BuildSessionResult, String> {
+        let outcome =
+            self.run_stepped_build(plan, provider, limits, confirmation_assertion_context)?;
+        let report = self.build_report(plan)?;
+        let manifest = if let Some(manifest_path) = exports.manifest_path() {
+            Some(self.export_build_manifest(plan, manifest_path)?)
+        } else {
+            None
+        };
+        let bundle = if let Some(bundle_root) = exports.bundle_root() {
+            if report.complete() {
+                Some(self.export_build_bundle(plan, bundle_root)?)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        Ok(BuildSessionResult {
+            outcome,
+            report,
+            manifest,
+            bundle,
+        })
+    }
+
+    pub fn run_json_build_session<S: JsonBuildProposalService>(
+        &self,
+        plan: &BuildPlan,
+        service: S,
+        limits: &BuildRunLimits,
+        confirmation_assertion_context: impl Into<String>,
+        exports: &BuildSessionExportPaths,
+    ) -> Result<JsonBuildSessionResult<S>, String> {
+        let transcript_service = TranscriptJsonBuildProposalService::new(service);
+        let mut provider = JsonBuildProposalProvider::new(transcript_service);
+        let outcome =
+            self.run_stepped_build(plan, &mut provider, limits, confirmation_assertion_context)?;
+        let report = self.build_report(plan)?;
+        let transcript_service = provider.into_inner();
+        let provider_transcript = transcript_service.transcript_report()?;
+        let service = transcript_service.into_inner();
+        if let Some(transcript_path) = exports.transcript_path() {
+            provider_transcript.write_json_file(transcript_path)?;
+        }
+        let manifest = if let Some(manifest_path) = exports.manifest_path() {
+            Some(self.export_build_manifest(plan, manifest_path)?)
+        } else {
+            None
+        };
+        let bundle = if let Some(bundle_root) = exports.bundle_root() {
+            if report.complete() {
+                Some(self.export_build_bundle_with_transcript(
+                    plan,
+                    bundle_root,
+                    &provider_transcript,
+                )?)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        Ok(JsonBuildSessionResult {
+            session: BuildSessionResult {
+                outcome,
+                report,
+                manifest,
+                bundle,
+            },
+            provider_transcript,
+            service,
+        })
+    }
+
+    pub fn run_build_session_from_plan_json_file<P: BuildProposalProvider>(
+        &self,
+        plan_path: impl AsRef<Path>,
+        provider: &mut P,
+        limits: &BuildRunLimits,
+        confirmation_assertion_context: impl Into<String>,
+        exports: &BuildSessionExportPaths,
+    ) -> Result<BuildSessionResult, String> {
+        let plan = BuildPlan::read_json_file(plan_path)?;
+        self.run_build_session(
+            &plan,
+            provider,
+            limits,
+            confirmation_assertion_context,
+            exports,
+        )
+    }
+
+    pub fn run_json_build_session_from_plan_json_file<S: JsonBuildProposalService>(
+        &self,
+        plan_path: impl AsRef<Path>,
+        service: S,
+        limits: &BuildRunLimits,
+        confirmation_assertion_context: impl Into<String>,
+        exports: &BuildSessionExportPaths,
+    ) -> Result<JsonBuildSessionResult<S>, String> {
+        let plan = BuildPlan::read_json_file(plan_path)?;
+        self.run_json_build_session(
+            &plan,
+            service,
+            limits,
+            confirmation_assertion_context,
+            exports,
+        )
+    }
+
+    pub fn run_command_json_build_session_from_files(
+        &self,
+        plan_path: impl AsRef<Path>,
+        provider_config_path: impl AsRef<Path>,
+        limits: &BuildRunLimits,
+        confirmation_assertion_context: impl Into<String>,
+        exports: &BuildSessionExportPaths,
+    ) -> Result<JsonBuildSessionResult<CommandJsonBuildProposalService>, String> {
+        let provider_config = CommandJsonProviderConfig::read_json_file(provider_config_path)?;
+        self.run_json_build_session_from_plan_json_file(
+            plan_path,
+            provider_config.to_service()?,
+            limits,
+            confirmation_assertion_context,
+            exports,
+        )
+    }
+
+    pub fn build_progress(&self, plan: &BuildPlan) -> Result<BuildProgress, String> {
+        if plan.exact_request().request_id() != self.request_id {
+            return Err("build plan request id does not match journal".to_string());
+        }
+        plan.validate()?;
+        let records = self.verify()?;
+        let by_id = records
+            .iter()
+            .map(|record| (record.record_id.clone(), record.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let mut completed_steps = Vec::new();
+        for (step_index, step) in plan.steps().iter().enumerate() {
+            let mut failures = Vec::new();
+            let mut completed = None;
+            for record in &records {
+                let Some(record_step_id) = record_build_step_id(record, &by_id, plan)? else {
+                    continue;
+                };
+                if record_step_id != step.step_id {
+                    continue;
+                }
+                match record.record_kind {
+                    RuntimeRecordKind::FailureEvidence => {
+                        let failure: FailureEvidenceReceipt = decode_payload(record)?;
+                        let gate_reasons = ancestor_gate_receipt(record, &by_id)?
+                            .map_or(Vec::new(), |gate| gate.reasons().to_vec());
+                        failures.push(BuildFailureContext {
+                            step_id: step.step_id.clone(),
+                            attempt_number: failures.len() + 1,
+                            failure_class: failure.failure_class.clone(),
+                            evidence: failure.evidence.clone(),
+                            gate_reasons,
+                            lock_signals: failure.lock_signals.clone(),
+                        });
+                    }
+                    RuntimeRecordKind::VerificationReceipt => {
+                        let verification: VerificationReceipt = decode_payload(record)?;
+                        if verification.success {
+                            let execution_record = only_parent(record, &by_id)?;
+                            completed = Some(CompletedBuildStep {
+                                step_id: step.step_id.clone(),
+                                attempts_used: failures.len() + 1,
+                                execution_record_id: execution_record.record_id.clone(),
+                                verification_record_id: record.record_id.clone(),
+                            });
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(completed) = completed {
+                completed_steps.push(completed);
+                continue;
+            }
+            return Ok(BuildProgress {
+                completed_steps,
+                current_step_index: Some(step_index),
+                current_step_id: Some(step.step_id.clone()),
+                current_failures: failures,
+            });
+        }
+        Ok(BuildProgress {
+            completed_steps,
+            current_step_index: None,
+            current_step_id: None,
+            current_failures: Vec::new(),
+        })
+    }
+
+    pub fn build_report(&self, plan: &BuildPlan) -> Result<BuildReport, String> {
+        let progress = self.build_progress(plan)?;
+        let records = self.verify()?;
+        let by_id = records
+            .iter()
+            .map(|record| (record.record_id.clone(), record))
+            .collect::<BTreeMap<_, _>>();
+        let mut completed_steps = Vec::new();
+        for completed in progress.completed_steps() {
+            let execution_record = by_id.get(completed.execution_record_id()).ok_or_else(|| {
+                format!(
+                    "completed step '{}' references missing execution record '{}'",
+                    completed.step_id(),
+                    completed.execution_record_id()
+                )
+            })?;
+            let verification_record =
+                by_id
+                    .get(completed.verification_record_id())
+                    .ok_or_else(|| {
+                        format!(
+                            "completed step '{}' references missing verification record '{}'",
+                            completed.step_id(),
+                            completed.verification_record_id()
+                        )
+                    })?;
+            if execution_record.record_kind != RuntimeRecordKind::ExecutionReceipt {
+                return Err(format!(
+                    "completed step '{}' execution reference is not an execution receipt",
+                    completed.step_id()
+                ));
+            }
+            if verification_record.record_kind != RuntimeRecordKind::VerificationReceipt {
+                return Err(format!(
+                    "completed step '{}' verification reference is not a verification receipt",
+                    completed.step_id()
+                ));
+            }
+            let execution: ExecutionReceipt = decode_payload(execution_record)?;
+            let verification: VerificationReceipt = decode_payload(verification_record)?;
+            if !verification.success() {
+                return Err(format!(
+                    "completed step '{}' references unsuccessful verification",
+                    completed.step_id()
+                ));
+            }
+            if verification.execution_receipt_id() != execution.receipt_id() {
+                return Err(format!(
+                    "completed step '{}' verification does not bind to execution",
+                    completed.step_id()
+                ));
+            }
+            completed_steps.push(CompletedBuildStepReport {
+                step_id: completed.step_id.clone(),
+                attempts_used: completed.attempts_used,
+                execution_record_id: completed.execution_record_id.clone(),
+                verification_record_id: completed.verification_record_id.clone(),
+                written_files: execution.written_files().to_vec(),
+                artifacts: artifact_files_from_execution(&execution, &self.host_bounds)?,
+                checked_claim_ids: verification.checked_claim_ids().to_vec(),
+                verification_evidence: verification.evidence().to_vec(),
+            });
+        }
+        Ok(BuildReport {
+            plan_id: plan.plan_id.clone(),
+            complete: progress.is_complete(),
+            completed_steps,
+            current_step_index: progress.current_step_index(),
+            current_step_id: progress.current_step_id().map(ToOwned::to_owned),
+            current_failures: progress.current_failures().to_vec(),
+            journal_record_count: records.len(),
+        })
+    }
+
+    pub fn build_manifest(&self, plan: &BuildPlan) -> Result<BuildManifest, String> {
+        Ok(BuildManifest {
+            schema_version: 1,
+            report: self.build_report(plan)?,
+        })
+    }
+
+    pub fn export_build_manifest(
+        &self,
+        plan: &BuildPlan,
+        manifest_path: impl AsRef<Path>,
+    ) -> Result<BuildManifest, String> {
+        let manifest = self.build_manifest(plan)?;
+        let json = manifest.to_json()?;
+        let manifest_path = manifest_path.as_ref();
+        if let Some(parent) = manifest_path.parent() {
+            fs::create_dir_all(parent).map_err(|err| {
+                format!(
+                    "could not create manifest directory '{}': {}",
+                    parent.display(),
+                    err
+                )
+            })?;
+        }
+        fs::write(manifest_path, json).map_err(|err| {
+            format!(
+                "could not write manifest '{}': {}",
+                manifest_path.display(),
+                err
+            )
+        })?;
+        Ok(manifest)
+    }
+
+    pub fn export_build_bundle(
+        &self,
+        plan: &BuildPlan,
+        bundle_root: impl AsRef<Path>,
+    ) -> Result<BuildBundle, String> {
+        self.export_build_bundle_internal(plan, bundle_root.as_ref(), None)
+    }
+
+    pub fn export_build_bundle_with_transcript(
+        &self,
+        plan: &BuildPlan,
+        bundle_root: impl AsRef<Path>,
+        provider_transcript: &JsonProviderTranscript,
+    ) -> Result<BuildBundle, String> {
+        self.export_build_bundle_internal(plan, bundle_root.as_ref(), Some(provider_transcript))
+    }
+
+    fn export_build_bundle_internal(
+        &self,
+        plan: &BuildPlan,
+        bundle_root: &Path,
+        provider_transcript: Option<&JsonProviderTranscript>,
+    ) -> Result<BuildBundle, String> {
+        let manifest = self.build_manifest(plan)?;
+        if !manifest.report().complete() {
+            return Err("cannot export bundle for incomplete build".to_string());
+        }
+        fs::create_dir_all(bundle_root).map_err(|err| {
+            format!(
+                "could not create bundle directory '{}': {}",
+                bundle_root.display(),
+                err
+            )
+        })?;
+        let manifest_path = bundle_root.join("build-manifest.json");
+        fs::write(&manifest_path, manifest.to_json()?).map_err(|err| {
+            format!(
+                "could not write manifest '{}': {}",
+                manifest_path.display(),
+                err
+            )
+        })?;
+        let records = self.verify()?;
+        let (journal_path, head_anchor_path) =
+            export_journal_evidence_to_bundle(&records, bundle_root)?;
+        let copied_artifacts =
+            copy_report_artifacts_to_bundle(manifest.report(), &self.host_bounds, bundle_root)?;
+        let transcript_path = if let Some(provider_transcript) = provider_transcript {
+            let transcript_path = bundle_root.join("evidence/provider_transcript.json");
+            provider_transcript.write_json_file(&transcript_path)?;
+            Some(transcript_path)
+        } else {
+            None
+        };
+        Ok(BuildBundle {
+            bundle_root: bundle_root.to_path_buf(),
+            manifest_path,
+            journal_path,
+            head_anchor_path,
+            transcript_path,
+            manifest,
+            copied_artifacts,
+            provider_transcript: provider_transcript.cloned(),
         })
     }
 
@@ -4808,6 +6373,77 @@ fn intent_draft_for_build_step(
     Ok(draft)
 }
 
+fn record_build_step_id(
+    record: &RuntimeRecordEnvelope,
+    by_id: &BTreeMap<String, RuntimeRecordEnvelope>,
+    plan: &BuildPlan,
+) -> Result<Option<String>, String> {
+    let Some(intent_record) = ancestor_confirmed_intent_record(record, by_id)? else {
+        return Ok(None);
+    };
+    let intent: ConfirmedIntentReceipt = decode_payload(intent_record)?;
+    Ok(build_step_id_from_intent(&intent, plan))
+}
+
+fn ancestor_confirmed_intent_record<'a>(
+    record: &'a RuntimeRecordEnvelope,
+    by_id: &'a BTreeMap<String, RuntimeRecordEnvelope>,
+) -> Result<Option<&'a RuntimeRecordEnvelope>, String> {
+    let mut current = record;
+    loop {
+        if current.record_kind == RuntimeRecordKind::ConfirmedIntentReceipt {
+            return Ok(Some(current));
+        }
+        let Some(parent_id) = current.parent_record_ids.first() else {
+            return Ok(None);
+        };
+        current = by_id
+            .get(parent_id)
+            .ok_or_else(|| format!("record '{}' parent is missing", current.record_id))?;
+    }
+}
+
+fn ancestor_gate_receipt(
+    record: &RuntimeRecordEnvelope,
+    by_id: &BTreeMap<String, RuntimeRecordEnvelope>,
+) -> Result<Option<GateReceipt>, String> {
+    let mut current = record;
+    loop {
+        if current.record_kind == RuntimeRecordKind::GateReceipt {
+            return decode_payload(current).map(Some);
+        }
+        let Some(parent_id) = current.parent_record_ids.first() else {
+            return Ok(None);
+        };
+        current = by_id
+            .get(parent_id)
+            .ok_or_else(|| format!("record '{}' parent is missing", current.record_id))?;
+    }
+}
+
+fn build_step_id_from_intent(intent: &ConfirmedIntentReceipt, plan: &BuildPlan) -> Option<String> {
+    let claim_ids = intent
+        .derived_claims()
+        .iter()
+        .map(|claim| claim.claim_id())
+        .collect::<BTreeSet<_>>();
+    for step in plan.steps() {
+        let instruction_id = format!("{}-instruction", step.step_id());
+        if !claim_ids.contains(instruction_id.as_str()) {
+            continue;
+        }
+        let all_acceptance_claims_match =
+            (0..step.acceptance_criteria().len()).all(|criterion_index| {
+                let claim_id = format!("{}-accept-{}", step.step_id(), criterion_index + 1);
+                claim_ids.contains(claim_id.as_str())
+            });
+        if all_acceptance_claims_match {
+            return Some(step.step_id().to_string());
+        }
+    }
+    None
+}
+
 fn verify_acceptance_claim(claim: &IntentClaim, bounds: &HostBounds) -> bool {
     let Some(rest) = claim.text().strip_prefix("file_contains:") else {
         return false;
@@ -4822,6 +6458,278 @@ fn verify_acceptance_claim(claim: &IntentClaim, bounds: &HostBounds) -> bool {
     fs::read_to_string(bounds.workspace_root().join(path))
         .map(|contents| contents.contains(needle))
         .unwrap_or(false)
+}
+
+fn artifact_files_from_execution(
+    execution: &ExecutionReceipt,
+    bounds: &HostBounds,
+) -> Result<Vec<BuildArtifactFile>, String> {
+    let mut artifacts = Vec::new();
+    for path in execution.written_files() {
+        if !is_workspace_relative(path) {
+            return Err(format!(
+                "execution artifact path '{}' is not workspace-relative",
+                path.display()
+            ));
+        }
+        let full_path = bounds.workspace_root().join(path);
+        let bytes = fs::read(&full_path)
+            .map_err(|err| format!("could not read artifact '{}': {}", path.display(), err))?;
+        artifacts.push(BuildArtifactFile {
+            path: path.clone(),
+            byte_len: bytes.len() as u64,
+            bytes_sha256: sha256_hex(&bytes),
+        });
+    }
+    Ok(artifacts)
+}
+
+fn copy_report_artifacts_to_bundle(
+    report: &BuildReport,
+    bounds: &HostBounds,
+    bundle_root: &Path,
+) -> Result<Vec<BuildArtifactFile>, String> {
+    let mut copied = Vec::new();
+    let mut seen = BTreeSet::new();
+    for step in report.completed_steps() {
+        for artifact in step.artifacts() {
+            if !seen.insert(artifact.path.clone()) {
+                continue;
+            }
+            if !is_workspace_relative(&artifact.path) {
+                return Err(format!(
+                    "artifact path '{}' is not workspace-relative",
+                    artifact.path.display()
+                ));
+            }
+            let source = bounds.workspace_root().join(&artifact.path);
+            let bytes = fs::read(&source).map_err(|err| {
+                format!(
+                    "could not read artifact '{}' for bundle: {}",
+                    artifact.path.display(),
+                    err
+                )
+            })?;
+            let actual_hash = sha256_hex(&bytes);
+            if bytes.len() as u64 != artifact.byte_len || actual_hash != artifact.bytes_sha256 {
+                return Err(format!(
+                    "artifact '{}' changed since report snapshot",
+                    artifact.path.display()
+                ));
+            }
+            let destination = bundle_root.join("artifacts").join(&artifact.path);
+            if let Some(parent) = destination.parent() {
+                fs::create_dir_all(parent).map_err(|err| {
+                    format!(
+                        "could not create artifact directory '{}': {}",
+                        parent.display(),
+                        err
+                    )
+                })?;
+            }
+            fs::write(&destination, bytes).map_err(|err| {
+                format!(
+                    "could not write bundled artifact '{}': {}",
+                    destination.display(),
+                    err
+                )
+            })?;
+            copied.push(artifact.clone());
+        }
+    }
+    Ok(copied)
+}
+
+fn export_journal_evidence_to_bundle(
+    records: &[RuntimeRecordEnvelope],
+    bundle_root: &Path,
+) -> Result<(PathBuf, PathBuf), String> {
+    let evidence_root = bundle_root.join("evidence");
+    fs::create_dir_all(&evidence_root).map_err(|err| {
+        format!(
+            "could not create evidence directory '{}': {}",
+            evidence_root.display(),
+            err
+        )
+    })?;
+    let journal_path = evidence_root.join("runtime_records.jsonl");
+    let mut jsonl = String::new();
+    for record in records {
+        let line = serde_json::to_string(record)
+            .map_err(|err| format!("could not serialize journal evidence: {err}"))?;
+        jsonl.push_str(&line);
+        jsonl.push('\n');
+    }
+    fs::write(&journal_path, jsonl).map_err(|err| {
+        format!(
+            "could not write journal evidence '{}': {}",
+            journal_path.display(),
+            err
+        )
+    })?;
+    let head_anchor_path = evidence_root.join("journal_head.json");
+    let head_anchor_json = serde_json::to_string_pretty(&head_anchor_for(records))
+        .map_err(|err| format!("could not serialize journal head evidence: {err}"))?;
+    fs::write(&head_anchor_path, head_anchor_json).map_err(|err| {
+        format!(
+            "could not write journal head evidence '{}': {}",
+            head_anchor_path.display(),
+            err
+        )
+    })?;
+    Ok((journal_path, head_anchor_path))
+}
+
+fn verified_bundle_artifacts(
+    report: &BuildReport,
+    bundle_root: &Path,
+) -> Result<Vec<BuildArtifactFile>, String> {
+    let mut artifacts = Vec::new();
+    let mut seen = BTreeSet::new();
+    for step in report.completed_steps() {
+        for artifact in step.artifacts() {
+            if !seen.insert(artifact.path.clone()) {
+                continue;
+            }
+            if !is_workspace_relative(&artifact.path) {
+                return Err(format!(
+                    "bundle artifact path '{}' is not workspace-relative",
+                    artifact.path.display()
+                ));
+            }
+            let path = bundle_root.join("artifacts").join(&artifact.path);
+            let bytes = fs::read(&path).map_err(|err| {
+                format!(
+                    "could not read bundled artifact '{}': {}",
+                    path.display(),
+                    err
+                )
+            })?;
+            let actual_hash = sha256_hex(&bytes);
+            if bytes.len() as u64 != artifact.byte_len || actual_hash != artifact.bytes_sha256 {
+                return Err(format!(
+                    "bundled artifact '{}' does not match manifest",
+                    artifact.path.display()
+                ));
+            }
+            artifacts.push(artifact.clone());
+        }
+    }
+    Ok(artifacts)
+}
+
+fn read_bundle_journal_records(path: &Path) -> Result<Vec<RuntimeRecordEnvelope>, String> {
+    let jsonl = fs::read_to_string(path).map_err(|err| {
+        format!(
+            "could not read bundle journal '{}': {}",
+            path.display(),
+            err
+        )
+    })?;
+    jsonl
+        .lines()
+        .enumerate()
+        .map(|(index, line)| {
+            serde_json::from_str::<RuntimeRecordEnvelope>(line).map_err(|err| {
+                format!(
+                    "could not decode bundle journal line {} in '{}': {}",
+                    index + 1,
+                    path.display(),
+                    err
+                )
+            })
+        })
+        .collect()
+}
+
+fn read_bundle_head_anchor(path: &Path) -> Result<JournalHeadAnchor, String> {
+    let json = fs::read_to_string(path).map_err(|err| {
+        format!(
+            "could not read bundle journal head '{}': {}",
+            path.display(),
+            err
+        )
+    })?;
+    serde_json::from_str(&json).map_err(|err| {
+        format!(
+            "could not decode bundle journal head '{}': {}",
+            path.display(),
+            err
+        )
+    })
+}
+
+fn verify_bundle_journal_envelopes(records: &[RuntimeRecordEnvelope]) -> Result<(), String> {
+    let mut record_ids = BTreeSet::new();
+    let mut sequences = BTreeSet::new();
+    let mut previous_hash = None;
+    for (index, record) in records.iter().enumerate() {
+        if record.sequence_number != index as u64 {
+            return Err(format!(
+                "bundle record '{}' has reordered sequence",
+                record.record_id
+            ));
+        }
+        let expected_record_id = expected_record_id(record.record_kind, record.sequence_number);
+        if record.record_id != expected_record_id {
+            return Err(format!(
+                "bundle record '{}' has invalid deterministic record id; expected '{}'",
+                record.record_id, expected_record_id
+            ));
+        }
+        if !sequences.insert(record.sequence_number) {
+            return Err(format!(
+                "bundle journal has duplicate sequence {}",
+                record.sequence_number
+            ));
+        }
+        if !record_ids.insert(record.record_id.clone()) {
+            return Err(format!(
+                "bundle journal has duplicate record id '{}'",
+                record.record_id
+            ));
+        }
+        if record.previous_record_hash != previous_hash {
+            return Err(format!(
+                "bundle record '{}' has broken previous hash link",
+                record.record_id
+            ));
+        }
+        for parent_id in &record.parent_record_ids {
+            if !record_ids.contains(parent_id) {
+                return Err(format!(
+                    "bundle record '{}' references missing or future parent '{}'",
+                    record.record_id, parent_id
+                ));
+            }
+        }
+        if record.payload_hash != hash_json_value(&record.payload)? {
+            return Err(format!(
+                "bundle record '{}' payload was modified",
+                record.record_id
+            ));
+        }
+        let expected_hash = compute_record_hash(RecordHashInput {
+            record_id: &record.record_id,
+            sequence_number: record.sequence_number,
+            record_kind: record.record_kind,
+            trace_id: &record.trace_id,
+            request_id: &record.request_id,
+            attempt_id: &record.attempt_id,
+            parent_record_ids: &record.parent_record_ids,
+            previous_record_hash: &record.previous_record_hash,
+            payload_hash: &record.payload_hash,
+            payload: &record.payload,
+        })?;
+        if record.record_hash != expected_hash {
+            return Err(format!(
+                "bundle record '{}' hash was modified",
+                record.record_id
+            ));
+        }
+        previous_hash = Some(record.record_hash.clone());
+    }
+    Ok(())
 }
 
 fn proposal_lock_signals(proposal: &MethodProposal) -> BTreeSet<String> {

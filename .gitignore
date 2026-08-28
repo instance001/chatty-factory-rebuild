@@ -1,1 +1,13 @@
 /target/
+
+# Local model/runtime assets are intentionally host-provisioned and can be huge.
+/models/*
+!/models/.gitkeep
+!/models/README.md
+/runtime/*
+!/runtime/.gitkeep
+!/runtime/README.md
+
+# Local scratch/export areas.
+/wip/*
+!/wip/.gitkeep
